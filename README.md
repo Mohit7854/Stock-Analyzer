@@ -92,9 +92,11 @@ All POST routes accept mode:
 - `"mode": "quick"` (default, lower latency)
 - `"mode": "deep"` (more context and deeper synthesis)
 
-### Deep-mode rubric judge
+### Rubric logic (quick, deep, compare)
 
-Deep mode now includes an LLM-as-Judge scoring pass (with deterministic fallback) using this rubric:
+The final synthesis stage now produces a quality rubric for each stock report.
+
+Rubric criteria:
 
 - Trend Relevance
 - Sector-Trend Fit
@@ -102,13 +104,49 @@ Deep mode now includes an LLM-as-Judge scoring pass (with deterministic fallback
 - Quote Quality
 - Report Completeness
 
-Rubric fields are returned in:
+Scoring model:
 
-- `output.rubric` (full rubric object)
+- Each criterion gets a `score` from 1 to 5 and an optional `note`.
+- `total_score` is the sum across 5 criteria (min 5, max 25).
+- `normalized_score` is calculated as:
+	`round((total_score / 25) * 100)`
+- `grade` mapping:
+	- `A`: 90-100
+	- `B`: 80-89
+	- `C`: 70-79
+	- `D`: 60-69
+	- `E`: below 60
+- `top_improvements` comes from judge output when available; otherwise it is auto-generated from the weakest criteria.
+
+Quick mode rubric behavior:
+
+- Uses deterministic scoring only.
+- Checks signal/report alignment, section completeness, metric density, and decision-text consistency.
+
+Deep mode rubric behavior:
+
+- Uses a multi-pass flow: initial report -> critique -> rubric critique -> revision.
+- Final rubric is produced by an LLM judge (`RUBRIC_JSON` contract) with deterministic fallback if judge output is unavailable or malformed.
+- The final rubric payload includes `source` to indicate `llm_judge` or `deterministic`.
+
+Where rubric data appears:
+
+- `output.rubric` (full object with criteria, total, normalized score, grade, improvements, source)
 - `summary.rubric_grade`
 - `summary.rubric_score`
 
-Comparison mode now uses rubric-aware winner selection metadata as part of final decisioning:
+Comparison winner logic with rubric:
+
+- Deterministic chooser uses rubric delta first when both rubric scores exist.
+- If `abs(rubric_delta) >= 3`, winner follows rubric score lead.
+- If rubric is tied/close (`abs(delta) < 3`) or missing, fallback is conviction then lower risk tier.
+- Confidence from rubric delta is scaled:
+	- `HIGH` when `abs(delta) >= 14`
+	- `MEDIUM` when `abs(delta) >= 7`
+	- `LOW` otherwise
+- If LLM compare output conflicts with deterministic choice and a strong rubric gap exists (`abs(delta) >= 18` with rubric basis), deterministic winner overrides.
+
+Comparison metadata fields:
 
 - `comparison_meta.winner_basis`
 - `comparison_meta.rubric_score_a`

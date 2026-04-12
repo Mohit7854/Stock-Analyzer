@@ -1,0 +1,20 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local environments and editor state
+.venv/
+.vscode/
+
+# Runtime outputs
+reports/
+
+# Secrets
+.env
+.env.txt
+
+# Git metadata
+.git/
+.gitignore

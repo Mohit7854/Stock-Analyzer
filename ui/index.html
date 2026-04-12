@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Equity Research Workbench</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;700;800&family=Inter:wght@400;500;600&family=Source+Serif+4:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/ui/assets/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-wrap">
+      <span class="brand-dot"></span>
+      <h1 class="brand">Equity Research Workbench</h1>
+    </div>
+    <span id="healthBadge" class="badge">Checking health...</span>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <p class="kicker">Multi-Agent Equity Intelligence</p>
+      <h2>Research-Grade Stock Analysis</h2>
+
+      <div class="mode-toggle">
+        <button id="modeQuick" type="button" class="mode-btn active">Quick Synthesis</button>
+        <button id="modeDeep" type="button" class="mode-btn">Deep Synthesis</button>
+      </div>
+      <p class="hero-sub">Combine market, technical, and fundamental research into clear investment reports.</p>
+    </section>
+
+    <section id="panelAnalyze" class="tab-panel active">
+      <div class="panel-grid">
+        <article class="card">
+          <div class="card-head">
+            <span class="head-accent head-accent-primary"></span>
+            <h3>Single Stock</h3>
+          </div>
+          <form id="singleForm" class="stack">
+            <label for="singleQuery">Query</label>
+            <input id="singleQuery" type="text" placeholder="Enter query (example: i want mrf stock)" required />
+            <button type="submit" class="btn btn-primary action-btn">Run Analysis</button>
+          </form>
+        </article>
+
+        <article class="card">
+          <div class="card-head">
+            <span class="head-accent head-accent-tertiary"></span>
+            <h3>Compare Two Stocks</h3>
+          </div>
+          <form id="compareForm" class="stack">
+            <label for="stockA">Stock A</label>
+            <input id="stockA" type="text" placeholder="Stock A" required />
+            <label for="stockB">Stock B</label>
+            <input id="stockB" type="text" placeholder="Stock B" required />
+            <button type="submit" class="btn btn-outline action-btn">Run Comparison</button>
+          </form>
+        </article>
+      </div>
+
+      <article class="card results-card">
+        <div class="results-head">
+          <h3>Market Signal</h3>
+          <span id="runStatus" class="muted">Idle</span>
+        </div>
+
+        <div id="summaryCards" class="summary-cards"></div>
+        <div id="resultPretty" class="result-pretty">
+          <p class="muted">Run an analysis to view the full report.</p>
+        </div>
+
+        <details id="rawJsonDetails" class="raw-toggle">
+          <summary>Show Raw JSON</summary>
+          <pre id="resultJson" class="json-box"></pre>
+        </details>
+      </article>
+    </section>
+
+    <section id="panelHistory" class="tab-panel">
+      <article class="card">
+        <div class="section-head">
+          <h3>History</h3>
+          <button id="clearHistoryBtn" type="button" class="btn btn-danger">Clear</button>
+        </div>
+        <p class="muted">Open previously generated single and comparison reports saved in this browser.</p>
+        <div id="historyList" class="list-wrap"></div>
+      </article>
+    </section>
+  </main>
+
+  <nav class="bottom-nav">
+    <button id="navAnalyze" class="nav-btn active" data-tab="analyze" type="button">Analyze</button>
+    <button id="navHistory" class="nav-btn" data-tab="history" type="button">History</button>
+  </nav>
+
+  <script src="/ui/assets/app.js"></script>
+</body>
+</html>

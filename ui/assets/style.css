@@ -279,6 +279,12 @@ input:focus {
   margin-bottom: 12px;
 }
 
+.results-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .muted {
   color: var(--muted);
   font-size: 0.84rem;

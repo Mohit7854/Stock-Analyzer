@@ -1,0 +1,1362 @@
+================================================================================
+STOCK MARKET ANALYSIS MULTI-AGENT PIPELINE - PROJECT DOCUMENTATION
+================================================================================
+Last Updated: April 2026
+Python Version: 3.10+
+
+================================================================================
+SECTION 1: PROJECT OVERVIEW
+================================================================================
+
+This is a compact, multi-agent equity research system that simulates a 
+professional investment desk. The system analyzes individual stocks or compares 
+two stocks side-by-side, producing structured investment recommendations with 
+risk assessments, position sizing, and quality rubric scores.
+
+The pipeline is powered by:
+- Gemini LLM (Google's generative AI model) for synthesis and reasoning
+- Yahoo Finance for real-time market, technical, and fundamental data
+- Tavily API (optional) for additional narrative-based research context
+- FastAPI for HTTP REST API and browser-based UI
+- Python orchestration layer for multi-step workflow
+
+The system can run in two modes:
+1. QUICK MODE: Fast responses with core analysis (lower latency)
+2. DEEP MODE: Comprehensive analysis with extensive context (higher latency)
+
+================================================================================
+SECTION 2: FOLDER STRUCTURE & FILE MANIFEST
+================================================================================
+
+PROJECT ROOT (w:\Work\Agentic Ai\term 2\EndSEM project\)
+│
+├── CORE AGENT FILES
+│   ├── agent1_market_research.py      (Market research & ticker resolution)
+│   ├── agent2_technical_analyst.py    (Technical signal generation)
+│   ├── agent3_fundamental_analyst.py  (Fundamental valuation & catalysts)
+│   └── agent4_investment_advisor.py   (Final synthesis & governance)
+│
+├── UTILITY FILES
+│   ├── agent4_utils.py                (Helper functions for Agent 4)
+│   ├── llm_client.py                  (Gemini API wrapper & client)
+│   ├── market_data.py                 (Yahoo Finance data fetcher)
+│
+├── API & WEB INTERFACE
+│   ├── api_service.py                 (FastAPI HTTP wrapper)
+│   ├── main.py                        (FastAPI entrypoint shim)
+│   ├── ui/                            (Browser-based frontend)
+│   │   ├── index.html
+│   │   ├── assets/
+│   │   │   ├── css/
+│   │   │   └── js/
+│   │
+├── ORCHESTRATION
+│   ├── run.py                         (Master CLI orchestrator)
+│
+├── CONFIGURATION & DOCS
+│   ├── .env                           (Environment variables - local only)
+│   ├── requirements.txt               (Python package dependencies)
+│   ├── README.md                      (Quick-start guide)
+│   ├── Dockerfile                     (Container deployment config)
+│   ├── start.sh                       (Shell startup script)
+│   └── .gitignore, .dockerignore      (VCS & Docker exclusions)
+│
+└── RUNTIME
+    ├── reports/                       (Generated analysis reports)
+    ├── __pycache__/                   (Python bytecode cache)
+    └── .git/                          (Version control)
+
+================================================================================
+SECTION 3: QUICK FILE SUMMARIES
+================================================================================
+
+1. agent1_market_research.py
+   Purpose: Resolves natural-language stock queries to tickers and fetches data.
+   Key Tasks:
+     - Parse user input and infer ticker/company intent using LLM
+     - Validate tickers against Yahoo Finance
+     - Fetch live stock snapshots and technical indicators
+     - Enrich context with Tavily web search results
+     - Generate market trend report (BEARISH, NEUTRAL, BULLISH)
+
+2. agent2_technical_analyst.py
+   Purpose: Analyzes price action, momentum, and support/resistance levels.
+   Key Tasks:
+     - Extract technical metrics (MA20/50/200, RSI, MACD, Bollinger Bands)
+     - Fetch technical context from Tavily (analyst commentary, options activity)
+     - Generate technical analysis report with entry/exit levels
+     - Produce signal (BUY/HOLD/SELL) and confidence (HIGH/MEDIUM/LOW)
+
+3. agent3_fundamental_analyst.py
+   Purpose: Evaluates business quality, valuation, and investment thesis.
+   Key Tasks:
+     - Analyze valuation metrics (P/E, P/B, EV/EBITDA)
+     - Assess financial health (debt, margins, ROE, FCF)
+     - Extract growth drivers and catalysts from web search
+     - Identify risks and industry headwinds
+     - Produce fundamental view and time horizon (SHORT/MEDIUM/LONG)
+
+4. agent4_investment_advisor.py
+   Purpose: Synthesizes all agent outputs into final decision with guardrails.
+   Key Tasks:
+     - Parse signals from all three agents
+     - Calculate bearish pressure score (0-5 scale)
+     - Apply bearish guardrails (conviction capping, risk escalation)
+     - Apply rubric penalties for quality under high bearish pressure
+     - Generate final recommendation with position sizing and warnings
+     - Compute quality rubric scores (trend relevance, alignment, completeness)
+
+5. agent4_utils.py
+   Purpose: Helper utilities for Agent 4 decision logic.
+   Key Functions:
+     - parse_signals(): Extract trend, signal, confidence, horizon from reports
+     - validate_stock_data(): Check for required data fields
+     - derive_position_size(): Calculate position size from conviction & risk
+     - StructuredDecision & ParsedSignals: Data classes for type safety
+     - extract_first_json_object(): Parse JSON from LLM responses
+     - apply_rule_overrides(): Legacy decision override logic
+
+6. llm_client.py
+   Purpose: Unified Gemini API client with retry logic and model fallbacks.
+   Key Features:
+     - HTTP wrapper around Google Gemini API
+     - Automatic retry with exponential backoff (up to 4 retries)
+     - Model fallback chain (gemini-2.0-flash → 1.5-flash-latest → 1.5-flash)
+     - API version negotiation (v1beta, v1)
+     - Timeout enforcement (default 180 seconds)
+     - Sanitized error logging (redacts API keys)
+
+7. market_data.py
+   Purpose: Yahoo Finance data fetcher with ticker resolution and validation.
+   Key Functions:
+     - resolve_ticker(): Convert natural language to valid Yahoo symbol
+     - get_stock_snapshot(): Fetch OHLC, volumes, indicators in one call
+     - Internal helpers to score ticker candidates and validate data
+
+8. api_service.py
+   Purpose: FastAPI HTTP wrapper around orchestration pipeline.
+   Key Endpoints:
+     - GET /: Serve browser UI (index.html)
+     - GET /api: Service metadata
+     - GET /health: Service status and key checks
+     - POST /analyze: Single stock analysis
+     - POST /compare: Two-stock comparison
+     - POST /run: Auto-route based on input type
+   Parameters: query, mode (quick|deep), save (boolean)
+
+9. run.py
+   Purpose: Master CLI orchestrator and report formatter.
+   Key Features:
+     - Parse CLI arguments (ticker, mode, save, compare)
+     - Orchestrate four-agent pipeline sequentially
+     - Generate markdown reports and save to reports/ folder
+     - Pretty-print console output with colored banners and progress
+     - Handle both single-stock and two-stock comparison flows
+
+10. main.py
+    Purpose: FastAPI entrypoint shim for auto-detection by deployment platforms.
+
+================================================================================
+SECTION 4: DETAILED FILE WORKINGS
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ AGENT 1: market_research.py - MARKET RESEARCH & TICKER RESOLUTION         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+WORKFLOW:
+1. inspect_user_input_with_llm(user_input: str) -> dict
+   - Sends raw user query to Gemini at the START (don't use heuristics alone)
+   - LLM returns JSON with ticker_hint, company_hint, exchange_hint
+   - Fallback if LLM fails: empty hints, uses deterministic resolver
+   - Why? Natural language is ambiguous (e.g., "MRF" = Media Research or stock)
+
+2. resolve_ticker(user_input: str) -> tuple[dict, dict, str]
+   - Extracts hints from LLM response or constructs from user phrase
+   - Builds candidate ticker list:
+     * Exchange-applied ticker (e.g., MRF.NS for NSE)
+     * Company name combinations
+     * Heuristic extraction (regex on tokens, exclude stopwords)
+   - Validates each candidate against Yahoo Finance (uses _symbol_has_data())
+   - Ranks candidates by:
+     * Quote type (EQUITY preferred)
+     * String similarity to input (normalized comparison)
+     * Token coverage (how many words from input match name/symbol)
+   - Returns best match with company name and exchange
+
+3. get_stock_snapshot(symbol: str, quick: bool = True) -> dict
+   - Uses yfinance.Ticker(symbol).history() and .info to fetch:
+     * Price, open, high, low, volume
+     * Moving averages: MA20, MA50, MA200
+     * RSI14, MACD, MACD signal, MACD histogram
+     * Bollinger Bands (upper, mid, lower)
+     * Support/resistance (20-day)
+     * 52-week high/low, avg volume
+     * Fundamentals: market cap, P/E, P/B, EV/EBITDA, debt/equity, margins
+     * Sector, industry, dividend yield
+     * Currency and info snapshot
+
+4. fetch_market_commentary(ticker: str, company: str, mode: str) -> dict
+   - Queries Tavily API with:
+     * Quick mode: Single query on analyst commentary/outlook (3 results)
+     * Deep mode: 5 queries (outlook, setup, options, strategy, valuation)
+   - Returns structured dict with top answers and snippets (320-540 chars)
+   - Gracefully skips if TAVILY_API_KEY not set
+
+5. run(stub_input: dict, mode: str = "quick") -> dict
+   - Entry point for market research agent
+   - Accepts dict with ticker, company, stock_data, market_report, etc.
+   - Calls _llm to generate market trend report with sections:
+     * Market Context & Macro Environment
+     * Trend Assessment (TREND: BULLISH|NEUTRAL|BEARISH at end)
+     * Signal Confirmation
+     * Risk Factors & Technicals Overview
+     * Summary & Outlook
+   - Output: market_report string with TREND marker at bottom
+
+KEY DATA STRUCTURES:
+- stock_data: {price, ma20, ma50, ma200, rsi14, macd, support_20d,
+              resistance_20d, low_52w, high_52w, trailing_pe, 
+              revenue_growth_pct, earnings_growth_pct, ...}
+- Output: {
+    'ticker': str,
+    'company': str,
+    'stock_data': dict,
+    'market_report': str,
+    'technical_report': str,
+    'fundamental_report': str,
+    'structured_output': dict,
+    'rubric': dict
+  }
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ AGENT 2: agent2_technical_analyst.py - TECHNICAL ANALYSIS                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+WORKFLOW:
+1. fetch_market_commentary(ticker, company, mode) -> dict
+   - Same as Agent 1 but for technical context
+   - Quick mode: analyst commentary on setup & support/resistance
+   - Deep mode: adds options activity and implied volatility
+
+2. analyze_technicals(ticker, company, stock_data, tavily_context, mode) -> str
+   - Constructs technical metrics dict from stock_data:
+     * Price, all moving averages (MA20/50/200)
+     * RSI14, MACD (value, signal, histogram)
+     * Bollinger Bands (all 3 bands)
+     * Support/resistance, 52-week high/low
+     * Volume averages and latest volume
+   - Creates analysis prompt with sections (quick or deep):
+     * Quick: Trend Structure, Support/Resistance, Momentum, Breakout, Setup, Summary
+     * Deep: 8 detailed sections (confluence matrix, scenario paths, trade plan)
+   - Sends to Gemini with system message about institutional-grade analysis
+   - LLM response must end with exactly:
+     SIGNAL: BUY|HOLD|SELL
+     CONFIDENCE: HIGH|MEDIUM|LOW
+   - Fallback logic if parse fails (deterministic signal based on MAs and RSI)
+
+3. run(stub_input, mode) -> dict
+   - Calls fetch_market_commentary and analyze_technicals
+   - Returns technical_report string with SIGNAL and CONFIDENCE markers
+
+KEY LOGIC:
+- Deterministic fallback:
+  * If price > MA50 > MA200: lean toward BUY (unless RSI > 70 → HOLD)
+  * If price < MA50 < MA200: lean toward SELL (unless RSI < 30 → HOLD)
+  * Neutral structure: HOLD
+- Confidence drops if conflicting signals or low participation (volume)
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ AGENT 3: agent3_fundamental_analyst.py - FUNDAMENTAL ANALYSIS             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+WORKFLOW:
+1. fetch_fundamental_context(ticker, company, mode) -> dict
+   - Tavily queries differ by mode:
+     * Quick: earnings outlook & catalysts, business risks
+     * Deep: 5 queries including competitive landscape, valuation debate
+   - Assembled into structured dict with answers and result snippets
+
+2. analyze_fundamentals(ticker, company, stock_data, technical_report, 
+                        tavily_context, mode) -> str
+   - Constructs fundamentals dict from stock_data:
+     * Valuation: P/E, P/B, EV/EBITDA
+     * Growth: revenue %, earnings %, margins, ROE, FCF
+     * Leverage: debt/equity
+     * Sector & industry
+   - Creates analysis prompt with sections (quick or deep):
+     * Quick: Valuation, Financial Health, Growth, Moat, Catalysts/Risks, Thesis
+     * Deep: 7 detailed sections with invalidating evidence
+   - Sends to Gemini with full Tavily context and snippet of technical report
+   - LLM response must end with exactly:
+     FUNDAMENTAL VIEW: BUY|HOLD|SELL
+     HORIZON: SHORT|MEDIUM|LONG
+   - Fallback if parse fails (infers from growth, valuation, debt ratios)
+
+3. run(stub_input, mode) -> dict
+   - Orchestrates fetching and analysis
+   - Returns fundamental_report with markers
+
+KEY LOGIC:
+- Fallback heuristic:
+  * High growth (>15%) + low P/E (<20): lean toward BUY
+  * Declining growth + high P/E + high debt: lean toward SELL
+  * Moderate everything: HOLD
+- Time horizon depends on thesis type (growth = LONG, cyclical = MEDIUM, etc.)
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ AGENT 4: agent4_investment_advisor.py - SYNTHESIS & GOVERNANCE           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+CRITICAL COMPONENT OF THE SYSTEM - MOST COMPLEX
+
+WORKFLOW:
+
+1. parse_signals(outputs: dict) -> dict
+   - Extracts markers from each agent report:
+     * TREND: ... from market_report
+     * SIGNAL: ... from technical_report
+     * CONFIDENCE: ... from technical_report
+     * FUNDAMENTAL VIEW: ... from fundamental_report
+     * HORIZON: ... from fundamental_report
+   - Normalizes to uppercase, maps aliases (STRONG BUY → BUY)
+   - Produces warnings if any signal is UNKNOWN or missing
+
+2. _market_regime_snapshot(signals, stock_data) -> dict
+   - Calculates BEARISH_PRESSURE (0-5 scale) based on:
+     1. Trend = BEARISH? (+1)
+     2. Technical signal = SELL? (+1)
+     3. Fundamental = SELL? (+1)
+     4. Price structure bearish (price < MA50 < MA200)? (+1)
+     5. RSI14 ≤ 45? (+1)
+   - Max pressure = 5 (all signals align bearish)
+   - Min pressure = 0 (all signals align bullish)
+   - Also calculates BULLISH_CONFIRMATION for BUY decisions
+
+3. _apply_bearish_guardrails(decision, signals, stock_data) -> tuple
+   - Core risk-management logic for capital preservation
+   - RULE 1: Verdict Downgrade
+     * BUY only allowed if bullish_confirmation ≥ 3 (multi-signal alignment)
+     * If pressure ≥ 2 AND verdict=BUY: downgrade to HOLD (bearish regime)
+     * If pressure ≥ 4 AND technical=SELL AND verdict≠SELL: force to SELL
+   - RULE 2: Conviction Capping
+     * pressure ≥ 2: cap conviction at 7 (reduce by 1)
+     * pressure ≥ 3: cap at 6 (reduce by 2)
+     * pressure ≥ 4: cap at 4 (reduce by 4)
+   - RULE 3: Risk Escalation
+     * pressure ≥ 2 AND risk=LOW: escalate to MEDIUM
+     * pressure ≥ 4 AND risk≠HIGH: escalate to HIGH
+   - RULE 4: Position Size Cap
+     * SELL verdict: max 0.5% (minimal exposure)
+     * HOLD verdict: max 2.0% (conservative)
+     * BUY verdict: max 4.5% (aggressive)
+     * Actual position = min(LLM position_size, verdict_cap)
+   - All guardrail violations logged as override notes
+
+4. _apply_rubric_regime_penalty(rubric_scores, decision, signals, stock) -> dict
+   - Quality rubric scoring under bearish regimes
+   - Only applies if pressure ≥ 3 (mild bearish pressure or higher)
+   - Penalizes specific rubric criteria:
+     * If verdict=BUY under bearish pressure:
+       - Trend Relevance capped at 2 (weak)
+       - Visual-Text Alignment capped at 2 (coherence question)
+     * If verdict=SELL under bearish pressure:
+       - Similar penalties for signal quality
+   - Updates rubric scores dict with penalty notes
+
+5. compute_rubric_decision(outputs: dict, mode: str) -> tuple
+   - Asks Gemini: "Rate this report on 5 criteria, each 1-5"
+   - Rubric Criteria:
+     * Trend Relevance: Does analysis reflect actual market trend?
+     * Sector-Trend Fit: Is recommendation aligned with industry dynamics?
+     * Visual-Text Alignment: Do numbers support narrative?
+     * Quote Quality: Evidence and expert perspective?
+     * Report Completeness: All required sections present?
+   - Grades rubric outputs (5=A, 4=B, 3=C, 2=D, 1=F)
+   - Normalizes final score to 0-100 scale
+
+6. parse_structured_decision(outputs: dict) -> StructuredDecision
+   - Searches LLM response for JSON block with:
+     * verdict: BUY|HOLD|SELL
+     * conviction: 1-10
+     * risk: LOW|MEDIUM|HIGH
+     * position_size_pct: float (%)
+     * time_horizon: SHORT|MEDIUM|LONG
+   - Validates verdicts, clamps conviction (1-10), validates risk levels
+   - Derives position_size from conviction and risk if not specified
+
+7. derive_position_size(conviction: int, risk: str) -> float
+   - Maps conviction (1-10) and risk level to suggested position size
+   - HIGH risk: position = conviction % (5-10% for conviction 5-10)
+   - MEDIUM risk: position = conviction * 0.4% (2-4% range)
+   - LOW risk: position = conviction * 0.2% (1-2% range)
+   - Example: conviction=7, risk=MEDIUM → 2.8% position
+
+8. run(stub_input, mode) -> dict
+   - Main orchestration for Agent 4
+   - Calls LLM to synthesize all prior reports into final decision
+   - LLM prompt includes:
+     * All three prior agent reports
+     * Stock data snapshot
+     * Explicit instructions for verdict, conviction, risk, position, horizon
+     * Request for DECISION_JSON at end of response
+   - Post-processing:
+     1. Parse signals from all reports
+     2. Extract structured decision from JSON
+     3. Calculate bearish pressure snapshot
+     4. Apply bearish guardrails (modify verdict, conviction, risk, position)
+     5. Generate quality rubric
+     6. Apply rubric regime penalties if pressure ≥ 3
+     7. Assemble final output with warnings and decision justification
+
+FINAL OUTPUT STRUCTURE:
+{
+  'ticker': str,
+  'company': str,
+  'stock_data': dict,
+  'market_report': str,
+  'technical_report': str,
+  'fundamental_report': str,
+  'final_report': str,
+  'structured_output': {
+    'verdict': 'BUY|HOLD|SELL',
+    'conviction': int (1-10),
+    'risk': 'LOW|MEDIUM|HIGH',
+    'position_size_pct': float,
+    'time_horizon': 'SHORT|MEDIUM|LONG'
+  },
+  'rubric': {
+    'criteria': {...},
+    'normalized_score': float (0-100),
+    'grade': 'A-F',
+    'source': 'LLM-generated',
+    'pressure_penalty_applied': bool
+  },
+  'agent4_warnings': {
+    'override_notes': [list of guardrail violations],
+    'decision_changes': str (summary of before/after)
+  }
+}
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ agent4_utils.py - DECISION HELPER UTILITIES                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+KEY DATA CLASSES:
+
+ParsedSignals:
+  - trend: BULLISH|NEUTRAL|BEARISH|UNKNOWN
+  - technical_signal: BUY|HOLD|SELL|UNKNOWN
+  - technical_confidence: HIGH|MEDIUM|LOW|UNKNOWN
+  - fundamental_view: BUY|HOLD|SELL|UNKNOWN
+  - horizon: SHORT|MEDIUM|LONG
+  - warnings: list of parsing issues
+
+StructuredDecision:
+  - verdict, conviction (1-10), risk, position_size_pct, time_horizon
+
+RuleDecision:
+  - force_no_buy: bool
+  - conflict_detected: bool
+  - all_aligned: bool
+  - conviction_adjustment: int
+  - risk_floor: str
+  - messages: list[str]
+
+KEY FUNCTIONS:
+
+parse_signals(outputs: dict) -> ParsedSignals
+  - Extracts TREND:, SIGNAL:, CONFIDENCE:, FUNDAMENTAL VIEW:, HORIZON: markers
+  - Uses regex patterns to find values (case-insensitive)
+  - Returns normalized ParsedSignals object with validation warnings
+
+validate_stock_data(stock_data: dict) -> tuple[list[str], list[str]]
+  - Checks for critical fields (price, ma50, ma200, rsi14)
+  - Checks for important fields (beta, PE, market_cap, etc.)
+  - Returns [errors], [warnings] lists
+
+derive_position_size(conviction: int, risk: str) -> float
+  - Risk=HIGH: position = conviction%
+  - Risk=MEDIUM: position = conviction * 0.4%
+  - Risk=LOW: position = conviction * 0.2%
+  - Clamps to reasonable bounds (0.1-10%)
+
+extract_first_json_object(raw: str) -> dict
+  - Removes markdown code blocks (```json, ```)
+  - Finds first { and last } in text
+  - Attempts JSON parse; returns {} if fails
+
+apply_rubric_regime_penalty(rubric_scores, decision, signals, stock) -> dict
+  - Modifies rubric scores if bearish_pressure ≥ 3
+  - Penalizes trend_relevance and visual_text_alignment for BUY under pressure
+  - Similar penalties for extreme verdicts
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ llm_client.py - GEMINI API CLIENT                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+RESPONSIBILITY: Unified HTTP wrapper around Google Gemini API with resilience
+
+KEY FUNCTIONS:
+
+check_gemini() -> tuple[bool, str]
+  - Verifies Gemini API key and finds working model
+  - Tries candidate models (gemini-2.0-flash, 1.5-flash-latest, 1.5-flash, 1.5-pro)
+  - Tries API versions (v1beta, v1)
+  - Last resort: lists all available models and picks best match
+  - Returns (success: bool, message: str)
+
+_llm(prompt: str, max_tokens=1200, agent_tag='Agent', system='') -> str
+  - Core function called by all agents for LLM queries
+  - Uses MODEL and _ACTIVE_API_VERSION set by check_gemini()
+  - Constructs JSON request with:
+    * system prompt (optional role/context)
+    * user prompt (the actual query)
+    * max_tokens for response length
+    * temperature=1.0 (default, can vary)
+  - Implements exponential backoff retry:
+    * MAX_RETRIES = 4
+    * RETRY_BASE_SECONDS = 1.5
+    * Delays: 1.5s, 2.25s, 3.375s, 5.06s (exponential)
+    * Only retries on 429 (rate limit) or 500+ (server error)
+    * Logs retry attempts with sanitized errors
+  - Raises ValueError if API key missing
+  - Raises RuntimeError if all retries exhausted
+  - Returns: Raw text response from model's first candidate
+
+ENVIRONMENT VARIABLES USED:
+  GEMINI_API_KEY: Required. Google API key for Gemini.
+  GEMINI_MODEL: Current model name (default: gemini-2.0-flash).
+  GEMINI_API_VERSION: API version (default: v1beta).
+  GEMINI_TIMEOUT: Seconds to wait (default: 180).
+  GEMINI_MAX_RETRIES: Max retry attempts (default: 4).
+  GEMINI_RETRY_BASE_SECONDS: Base retry delay in seconds (default: 1.5).
+  GEMINI_BASE_URL: Gemini endpoint URL (default: https://generativelanguage.googleapis.com).
+  GEMINI_MODEL_FALLBACKS: Comma-separated fallback models.
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ market_data.py - YAHOO FINANCE DATA FETCHER                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+RESPONSIBILITY: Fetch and normalize stock data from Yahoo Finance
+
+KEY FUNCTIONS:
+
+resolve_ticker(user_input: str) -> dict
+  - Converts natural-language query to Yahoo Finance symbol
+  - Process:
+    1. If compact query matches ticker pattern ([A-Z0-9.]{1,12}), try direct lookup:
+       - With .NS suffix (NSE India)
+       - With .BO suffix (BSE India)
+       - Without suffix (US or default exchange)
+    2. If direct fails, use yfinance.Search() to find candidates
+    3. Score candidates by:
+       - Quote type (EQUITY preferred)
+       - Symbol match to query (high priority)
+       - Company name match to query
+       - Token coverage (how many query words found in name/symbol)
+       - Exchange preference (NSE/BSE favor Indian symbols)
+    4. Return best match with company name and exchange info
+  - Raises RuntimeError if no match found
+
+get_stock_snapshot(symbol: str, quick: bool = True) -> dict
+  - Fetches complete stock snapshot from Yahoo Finance
+  - Data fetched:
+    * OHLCV: open, high, low, close, volume
+    * Moving Averages: MA20, MA50, MA200 (calculated)
+    * Momentum: RSI14, MACD, MACD Signal (calculated)
+    * Bollinger Bands: all three bands (calculated)
+    * Support/Resistance: 20-day low/high
+    * Ranges: 52-week high/low, avg volume
+    * Fundamentals: P/E, P/B, EV/EBITDA, debt/equity, margins, ROE, FCF
+    * Meta: sector, industry, dividend yield, market cap
+    * Currency of price
+  - Returns flat dict with all fields (rounded to 2 decimals where applicable)
+  - Gracefully handles missing data (fills with None)
+
+HELPER FUNCTIONS:
+  _to_float(value) -> float | None: Safe type conversion
+  _to_int(value) -> int | None: Safe integer conversion
+  _ticker_info(symbol) -> dict: Fetch yfinance Ticker.info
+  _symbol_has_data(symbol) -> bool: Check if ticker returns any OHLC
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ api_service.py - FASTAPI REST WRAPPER                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+RESPONSIBILITY: HTTP REST API layer and web UI serving
+
+KEY ENDPOINTS:
+
+1. GET /
+   Description: Serve browser UI
+   Response: HTML index.html if exists, else metadata JSON
+   Purpose: Single-page app for stock analysis UI
+
+2. GET /api
+   Description: Service metadata
+   Response: {
+     "service": "stock-analysis-api",
+     "ui": "/",
+     "endpoints": [...],
+     "modes": ["quick", "deep"]
+   }
+
+3. GET /health
+   Description: Full service health check
+   Response: {
+     "status": "healthy|degraded",
+     "gemini": {
+       "ready": bool,
+       "model": str,
+       "message": str
+     },
+     "tavily": {
+       "configured": bool,
+       "api_key_set": bool
+     },
+     "timestamp": ISO datetime
+   }
+
+4. POST /analyze
+   Request: {
+     "query": "AAPL",
+     "mode": "quick",
+     "save": false
+   }
+   Response: Full analysis output (same as run.py output)
+   Description: Single stock analysis
+
+5. POST /compare
+   Request: {
+     "stock_a": "AAPL",
+     "stock_b": "MSFT",
+     "mode": "quick",
+     "save": false
+   }
+   Response: {
+     "comparison": {
+       "stock_a": {...},
+       "stock_b": {...},
+       "relative_metrics": {...}
+     }
+   }
+   Description: Two-stock side-by-side analysis
+
+6. POST /run
+   Request: {
+     "query": "AAPL",
+     "mode": "quick",
+     "save": false
+   } OR {
+     "queries": ["AAPL", "MSFT"],
+     ...
+   }
+   Response: Auto-routes to /analyze or /compare based on input
+   Description: Smart entry point for both single and paired queries
+
+QUERY PARAMETERS (all endpoints):
+  - save (bool, optional): Save report to reports/ folder (default: false)
+  - mode (str, optional): "quick" or "deep" (default: "quick")
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ run.py - MASTER CLI ORCHESTRATOR                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+RESPONSIBILITY: CLI entry point, multi-agent orchestration, report generation
+
+ENTRY FUNCTIONS:
+
+main() -> None
+  - Parses CLI arguments:
+    * TICKER: First positional argument (e.g., "AAPL", "MRF")
+    * COMPARE_TICKER: Optional second argument for comparison
+    * --mode: "quick" or "deep" (default: quick)
+    * --save: Save markdown report to reports/ folder
+  - Detects input type:
+    * Single query: run_single()
+    * Two queries: run_compare()
+    * "compare X and Y" pattern: parse and run_compare()
+  - Orchestrates entire pipeline:
+    1. Check Gemini API health (check_gemini())
+    2. For each ticker:
+       a. Agent 1: Market research (resolve ticker, fetch data, trend report)
+       b. Agent 2: Technical analyst (analyze charts, generate signal)
+       c. Agent 3: Fundamental analyst (evaluate business, thesis)
+       d. Agent 4: Investment advisor (synthesize, apply guardrails)
+    3. Generate markdown report with all sections
+    4. Print colorized console output
+    5. Optionally save to reports/{TICKER}_{YYYYMMDD_HHMMSS}.md
+
+PIPELINE ORCHESTRATION:
+
+run_single(ticker: str, mode: str = "quick", save: bool = False) -> dict
+  1. Call agent1.run(ticker) → {ticker, company, stock_data, market_report, ...}
+  2. Pass output to agent2.run(output) → adds technical_report
+  3. Pass output to agent3.run(output) → adds fundamental_report
+  4. Pass output to agent4.run(output) → adds final decision, rubric, warnings
+  5. Generate markdown report (if save=True)
+  6. Print console output
+  7. Return full output dict
+
+run_compare(ticker_a: str, ticker_b: str, mode: str = "quick", 
+            save: bool = False) -> dict
+  1. run_single(ticker_a) → output_a
+  2. run_single(ticker_b) → output_b
+  3. Generate comparative markdown
+  4. Compute relative metrics (position size diff, conviction delta, etc.)
+  5. Return {comparison: {stock_a, stock_b, relative_metrics}, ...}
+
+REPORT GENERATION:
+
+generate_report(output: dict, mode: str = "quick") -> str
+  - Creates markdown report with sections:
+    * Title and timestamp
+    * Agent 1: Market Research (ticker, company, market context, trend)
+    * Agent 2: Technical Analysis (table of metrics, signal, confidence)
+    * Agent 3: Fundamental Analysis (valuation, growth, risks)
+    * Agent 4: Investment Decision (verdict, conviction, risk, position, rubric)
+    * Guardrail Warnings (if any)
+    * Scenario Targets (bull/base/bear)
+    * Risk Register
+    * Catalysts to Watch
+    * Caveats & Disclaimers
+
+CLI USAGE:
+
+# Single stock (quick mode, don't save)
+python run.py AAPL
+
+# Single stock, deep mode, save to reports/
+python run.py AAPL --mode deep --save
+
+# Two-stock comparison
+python run.py AAPL MSFT
+python run.py AAPL MSFT --mode deep --save
+
+# Natural language
+python run.py "compare Apple and Microsoft"
+
+================================================================================
+SECTION 5: END-TO-END PIPELINE FLOW DIAGRAM
+================================================================================
+
+USER INPUT (CLI or API)
+│
+├─ NATURAL LANGUAGE: "Should I buy Apple?"
+│  └─ Agent 1 resolves: "AAPL" on NASDAQ
+│
+└─ EXPLICIT TICKER: "AAPL"
+
+        ↓
+
+AGENT 1: MARKET RESEARCH
+├─ Input: ticker, company name
+├─ Fetch: Yahoo Finance snapshot (OHLCV, indicators, fundamentals)
+├─ Fetch: Tavily market commentary
+├─ Generate: Trend report (TREND: BULLISH|NEUTRAL|BEARISH)
+└─ Output: market_report with trend marker
+
+        ↓
+
+AGENT 2: TECHNICAL ANALYST
+├─ Input: stock_data, market_report
+├─ Extract: MA20/50/200, RSI, MACD, Bollinger, support/resistance
+├─ Fetch: Tavily technical context (analyst setup, options)
+├─ Generate: Technical analysis with entry/stop/targets
+├─ Output: technical_report with markers (SIGNAL: BUY|HOLD|SELL, CONFIDENCE: HIGH|MEDIUM|LOW)
+└─ Fallback: Deterministic signal if parsing fails
+
+        ↓
+
+AGENT 3: FUNDAMENTAL ANALYST
+├─ Input: stock_data, technical_report
+├─ Extract: P/E, growth, debt, margins, ROE
+├─ Fetch: Tavily research on catalysts, risks, competitive landscape
+├─ Generate: Fundamental thesis with bull/bear perspectives
+├─ Output: fundamental_report with markers (FUNDAMENTAL VIEW: BUY|HOLD|SELL, HORIZON: SHORT|MEDIUM|LONG)
+└─ Fallback: Deterministic view if parsing fails
+
+        ↓
+
+AGENT 4: INVESTMENT ADVISOR (SYNTHESIS & GOVERNANCE)
+├─ Parse: Extract signals from all three reports
+│  ├─ Trend: BULLISH|NEUTRAL|BEARISH
+│  ├─ Technical: BUY|HOLD|SELL
+│  ├─ Fundamental: BUY|HOLD|SELL
+│  └─ Horizon: SHORT|MEDIUM|LONG
+│
+├─ Calculate: BEARISH_PRESSURE (0-5 scale)
+│  ├─ Trend=BEARISH? +1
+│  ├─ Technical=SELL? +1
+│  ├─ Fundamental=SELL? +1
+│  ├─ Structure bearish (Price < MA50 < MA200)? +1
+│  └─ RSI ≤ 45? +1
+│
+├─ Generate: LLM synthesis with all context
+│  └─ Request: Verdict, conviction (1-10), risk (LOW|MEDIUM|HIGH),
+│             position size (%), catalysts, risks, 12-month scenarios
+│
+├─ Apply: BEARISH GUARDRAILS (if pressure ≥ 2)
+│  ├─ Verdict: Cap BUY only if bullish_confirmation ≥ 3, else HOLD
+│  ├─ Verdict: Force SELL if pressure ≥ 4 and technical=SELL
+│  ├─ Conviction: Cap at 7 (≥2), 6 (≥3), or 4 (≥4)
+│  ├─ Risk: Escalate from LOW to MEDIUM (≥2) or to HIGH (≥4)
+│  └─ Position: Cap at 0.5% (SELL), 2.0% (HOLD), or 4.5% (BUY)
+│
+├─ Generate: QUALITY RUBRIC (only if pressure ≥ 3)
+│  ├─ Ask LLM: Score 5 criteria (1-5 each)
+│  │  ├─ Trend Relevance
+│  │  ├─ Sector-Trend Fit
+│  │  ├─ Visual-Text Alignment
+│  │  ├─ Quote Quality
+│  │  └─ Report Completeness
+│  ├─ Convert: To A-F grades and 0-100 scale
+│  └─ Penalize: Rubric scores if BUY under high bearish pressure
+│
+└─ Output: {
+     verdict (BUY|HOLD|SELL),
+     conviction (1-10),
+     risk (LOW|MEDIUM|HIGH),
+     position_size_pct,
+     time_horizon,
+     rubric_score (0-100),
+     rubric_grade (A-F),
+     override_warnings (list of guardrail violations)
+   }
+
+        ↓
+
+REPORT GENERATION & OUTPUT
+├─ Console: Pretty-printed summary with colors
+├─ Return: Full structured JSON with all intermediate reports
+├─ Save: Markdown report to reports/{TICKER}_{timestamp}.md (if --save)
+└─ API: JSON response to /analyze, /compare, or /run endpoint
+
+================================================================================
+SECTION 6: TECHNICAL STACK & DEPENDENCIES
+================================================================================
+
+LANGUAGE & RUNTIME:
+  Python 3.10+ (type hints, match/case statements)
+
+EXTERNAL APIS:
+  1. Google Gemini API
+     - For all LLM-based synthesis and reasoning
+     - Models: gemini-2.0-flash (primary), 1.5-flash-latest, 1.5-flash, 1.5-pro (fallback)
+     - Base URL: https://generativelanguage.googleapis.com/v1beta/models/...
+     - Auth: API key via GEMINI_API_KEY env var
+
+  2. Yahoo Finance (via yfinance library)
+     - Public API, no auth required
+     - Data: OHLCV, indicators, fundamentals, search
+     - Response includes: price, MAs, RSI, MACD, P/E, debt, margins, etc.
+
+  3. Tavily API (optional)
+     - For narrative-based research context
+     - Requires TAVILY_API_KEY env var
+     - Queries: market commentary, technical setup, catalysts, risks, competitive analysis
+
+PYTHON PACKAGES (from requirements.txt):
+  - requests ≥2.31.0 (HTTP for Gemini API)
+  - yfinance ≥0.2.54 (Yahoo Finance data)
+  - pandas ≥2.2.0 (Data manipulation for calculations)
+  - tavily-python ≥0.5.0 (Tavily search API)
+  - python-dotenv ≥1.0.0 (Load .env file)
+  - fastapi ≥0.115.0 (HTTP REST framework)
+  - uvicorn[standard] ≥0.30.0 (ASGI server for FastAPI)
+
+DEPLOYMENT OPTIONS:
+  1. Local CLI: python run.py AAPL
+  2. Local API: uvicorn api_service:app --host 127.0.0.1 --port 8000
+  3. Docker: docker build -t stock-analysis . && docker run ...
+  4. Cloud: Deploy Dockerfile to AWS, GCP, Azure, Railway, etc.
+
+================================================================================
+SECTION 7: KEY CONCEPTS & GUARDRAIL LOGIC
+================================================================================
+
+BEARISH PRESSURE (0-5 SCALE):
+  Measurement of how many signals align bearish. Used to escalate risk and 
+  constrain position sizing when market regime is deteriorating.
+
+  Calculated from:
+    1. Market Trend (Agent 1): BEARISH? YES=+1
+    2. Technical Signal (Agent 2): SELL? YES=+1
+    3. Fundamental View (Agent 3): SELL? YES=+1
+    4. Price Structure: Price < MA50 < MA200? YES=+1
+    5. Momentum: RSI14 ≤ 45? YES=+1
+  
+  Interpretation:
+    - Pressure 0-1: Bullish regime, allow larger positions
+    - Pressure 2-3: Mixed/mild bearish, moderate caution
+    - Pressure 4-5: Strong bearish, defensive stance only
+  
+  GUARDRAIL RULES TRIGGERED:
+    - Pressure ≥ 2: Cap conviction at 7, escalate risk to MEDIUM
+    - Pressure ≥ 3: Cap conviction at 6, apply rubric penalties
+    - Pressure ≥ 4: Cap conviction at 4, force SELL if tech=SELL, escalate risk to HIGH
+
+CONVICTION (1-10 SCALE):
+  Strength of the analyst's belief in the recommendation.
+  - 10: Highest confidence, multi-signal alignment, clear thesis
+  - 5-7: Moderate conviction, good evidence but some unknowns
+  - 1-4: Low conviction, conflicting signals or limited data
+  
+  Capped by:
+    - Bearish regime pressure (see above)
+    - Multi-signal alignment (BUY only with ≥3 signals agreeing)
+    - Risk level (higher risk = lower conviction cap)
+
+POSITION SIZING (%):
+  Recommended portfolio allocation.
+  - Derived from: conviction (1-10) and risk level (LOW, MEDIUM, HIGH)
+  - Base formula:
+    * HIGH risk: conviction%
+    * MEDIUM risk: conviction * 0.4%
+    * LOW risk: conviction * 0.2%
+  - Further capped by verdict:
+    * SELL verdict: max 0.5% (exit position)
+    * HOLD verdict: max 2.0% (conservative allocation)
+    * BUY verdict: max 4.5% (aggressive position)
+  - Examples:
+    * BUY, conviction 9, risk LOW → 1.8% (9 * 0.2%, capped at 4.5%)
+    * BUY, conviction 7, risk HIGH → 7% (capped at 4.5% by verdict)
+    * HOLD, conviction 6, risk MEDIUM → 2.0% (capped by verdict)
+    * SELL, conviction 8, risk HIGH → 0.5% (capped by verdict)
+
+RUBRIC QUALITY SCORING:
+  Five-point assessment of report quality and evidence strength.
+  Criteria scored 1-5:
+    1. TREND RELEVANCE: Does analysis reflect actual market trend?
+    2. SECTOR-TREND FIT: Is recommendation aligned with industry dynamics?
+    3. VISUAL-TEXT ALIGNMENT: Do numbers support narrative?
+    4. QUOTE QUALITY: Strength of evidence and expert perspective?
+    5. REPORT COMPLETENESS: All required sections present and substantial?
+  
+  Scoring Scale:
+    5 = Excellent (strong evidence, coherence, coverage)
+    4 = Good (solid with minor gaps)
+    3 = Adequate (visible weaknesses but usable)
+    2 = Weak (under-supported, gaps)
+    1 = Deficient (materially incomplete or contradictory)
+  
+  Final Grade:
+    Average score → Letter grade (5=A, 4=B, 3=C, 2=D, 1=F)
+  
+  Penalties Applied:
+    - If bearish_pressure ≥ 3 and verdict=BUY:
+      * Trend Relevance capped at 2
+      * Visual-Text Alignment capped at 2
+    - Rationale: BUY in bearish regime is coherence-challenged
+
+TIME HORIZONS:
+  - SHORT: Expected impact within 1-3 months (catalyst-driven, near-term event)
+  - MEDIUM: 3-12 month outlook (earnings cycle, seasonal trend)
+  - LONG: 12+ months (structural growth, transformation, decade+ thesis)
+  
+  Inferred from:
+    - High growth → LONG (sustained expansion)
+    - Cyclical + earnings surprise → MEDIUM (mean reversion)
+    - Event catalyst → SHORT (binary near-term outcome)
+
+SIGNAL ALIGNMENT LOGIC:
+  BUY requires multi-signal confirmation (≥3 of 4):
+    1. Market Trend = BULLISH
+    2. Technical Signal = BUY
+    3. Fundamental View = BUY
+    4. Price Structure = BULLISH (price > MA50 > MA200)
+  
+  If <3 aligned, BUY downgraded to HOLD (capital preservation guardrail).
+
+================================================================================
+SECTION 8: CONFIGURATION & ENVIRONMENT VARIABLES
+================================================================================
+
+.env FILE (in project root):
+  Required (must set):
+    GEMINI_API_KEY=your_gemini_api_key_here
+    GEMINI_MODEL=gemini-2.0-flash
+
+  Optional but recommended:
+    TAVILY_API_KEY=tvly-...     (for richer research context)
+    GEMINI_API_VERSION=v1beta   (default if omitted)
+    GEMINI_TIMEOUT=180          (seconds)
+    GEMINI_MAX_RETRIES=4        (retry attempts)
+    GEMINI_RETRY_BASE_SECONDS=1.5 (exponential backoff base)
+
+EXAMPLE .env:
+  GEMINI_API_KEY=AIzaSyDx...
+  GEMINI_MODEL=gemini-2.0-flash
+  TAVILY_API_KEY=tvly-...
+
+================================================================================
+SECTION 9: API ENDPOINTS & HTTP EXAMPLES
+================================================================================
+
+1. Health Check
+  GET /health
+  
+  Response (200):
+  {
+    "status": "healthy",
+    "gemini": {
+      "ready": true,
+      "model": "gemini-2.0-flash",
+      "message": "Gemini API is ready..."
+    },
+    "tavily": {
+      "configured": true,
+      "api_key_set": true
+    },
+    "timestamp": "2026-04-14T10:30:45Z"
+  }
+
+2. Single Stock Analysis
+  POST /analyze
+  Content-Type: application/json
+  
+  Request:
+  {
+    "query": "AAPL",
+    "mode": "quick",
+    "save": true
+  }
+  
+  Response (200):
+  {
+    "ticker": "AAPL",
+    "company": "Apple Inc.",
+    "stock_data": {...},
+    "market_report": "...",
+    "technical_report": "...",
+    "fundamental_report": "...",
+    "final_report": "...",
+    "structured_output": {
+      "verdict": "BUY",
+      "conviction": 7,
+      "risk": "MEDIUM",
+      "position_size_pct": 2.8,
+      "time_horizon": "LONG"
+    },
+    "rubric": {
+      "normalized_score": 82,
+      "grade": "A",
+      "criteria": {...}
+    },
+    "agent4_warnings": {...}
+  }
+
+3. Two-Stock Comparison
+  POST /compare
+  Content-Type: application/json
+  
+  Request:
+  {
+    "stock_a": "AAPL",
+    "stock_b": "MSFT",
+    "mode": "quick",
+    "save": false
+  }
+  
+  Response (200):
+  {
+    "comparison": {
+      "stock_a": { ...full analysis for AAPL... },
+      "stock_b": { ...full analysis for MSFT... },
+      "relative_metrics": {
+        "verdict_comp": "A: BUY vs B: HOLD",
+        "conviction_diff": 1.0,
+        "risk_comp": "A: MEDIUM vs B: HIGH",
+        "position_size_diff": 1.2,
+        "rubric_score_diff": 5
+      }
+    }
+  }
+
+4. Auto Route (Single or Compare)
+  POST /run
+  
+  Request (Single):
+  {
+    "query": "AAPL",
+    "mode": "deep",
+    "save": true
+  }
+  
+  Request (Compare):
+  {
+    "queries": ["AAPL", "MSFT"],
+    "mode": "quick",
+    "save": false
+  }
+
+================================================================================
+SECTION 10: USAGE EXAMPLES & COMMON WORKFLOWS
+================================================================================
+
+CLI WORKFLOWS:
+
+1. Quick single-stock analysis (console only)
+   $ python run.py AAPL
+   
+   Output: Colored console summary, no file saved
+
+2. Deep analysis with report saved
+   $ python run.py AAPL --mode deep --save
+   
+   Output: Detailed console output, report saved to reports/AAPL_20260414_103045.md
+
+3. Two-stock comparison
+   $ python run.py AAPL MSFT
+   
+   Output: Side-by-side analysis, comparative metrics
+
+4. Natural language input
+   $ python run.py "compare Apple and Microsoft"
+   
+   Output: Agents resolve names, then run comparison
+
+5. Quick check with comparison
+   $ python run.py "AAPL" "MSFT" --mode quick
+
+API WORKFLOWS:
+
+1. Start API server
+   $ uvicorn api_service:app --host 127.0.0.1 --port 8000
+   
+   Browser: http://127.0.0.1:8000/
+
+2. Single stock via curl
+   $ curl -X POST http://127.0.0.1:8000/analyze \
+     -H "Content-Type: application/json" \
+     -d '{"query":"AAPL","mode":"quick"}'
+
+3. Check health
+   $ curl http://127.0.0.1:8000/health
+
+4. Python requests example
+   import requests
+   
+   resp = requests.post(
+     'http://127.0.0.1:8000/analyze',
+     json={'query': 'MSFT', 'mode': 'deep', 'save': True}
+   )
+   result = resp.json()
+   print(f"Verdict: {result['structured_output']['verdict']}")
+   print(f"Conviction: {result['structured_output']['conviction']}")
+
+DOCKER DEPLOYMENT:
+
+1. Build image
+   $ docker build -t stock-analysis .
+
+2. Run container (local)
+   $ docker run -p 8000:8000 \
+     -e GEMINI_API_KEY=AIzaSy... \
+     -e TAVILY_API_KEY=tvly-... \
+     stock-analysis
+
+3. Access at http://127.0.0.1:8000/
+
+================================================================================
+SECTION 11: ERROR HANDLING & TROUBLESHOOTING
+================================================================================
+
+COMMON ISSUES:
+
+1. "GEMINI_API_KEY is not set"
+   Fix: Add GEMINI_API_KEY to .env file
+   
+2. "No ticker match found for 'XYZ'"
+   Fix: Verify ticker exists on Yahoo Finance (e.g., use .NS suffix for NSE)
+   
+3. "HTTP 429: Rate limit exceeded"
+   Cause: Too many Gemini API calls too quickly
+   Fix: Wait or adjust GEMINI_RETRY_BASE_SECONDS in .env
+   
+4. "Tavily context will be skipped"
+   Cause: TAVILY_API_KEY not set
+   Fix: Add to .env if you have a Tavily account (optional)
+   
+5. Report contains "UNKNOWN" signals
+   Cause: LLM response didn't include expected markers (SIGNAL:, etc.)
+   Fix: Check LLM response format or fallback logic
+
+ERROR RECOVERY:
+
+- Agent 1 (ticker resolution): Falls back to heuristic parsing if LLM unavailable
+- Agent 2 (technical): Falls back to MA/RSI-based signal if parsing fails
+- Agent 3 (fundamental): Falls back to growth/PE/debt heuristic if parsing fails
+- Agent 4 (synthesis): Still produces decision even if rubric scoring fails
+- All agents: Structured warnings logged if data missing or parse issues
+
+================================================================================
+SECTION 12: PERFORMANCE & OPTIMIZATION NOTES
+================================================================================
+
+LATENCY PROFILE:
+
+Quick Mode (typical):
+  - Agent 1 - 2-3s (Yahoo + Tavily, Gemini synthesis)
+  - Agent 2 - 2-3s (Technical analysis)
+  - Agent 3 - 2-3s (Fundamental analysis)
+  - Agent 4 - 3-4s (Guardrails, rubric, synthesis)
+  TOTAL: ~9-13 seconds per stock
+
+Deep Mode:
+  - Each agent: +2-3s (more Tavily context, longer LLM output)
+  TOTAL: ~20-30 seconds per stock
+
+Comparison:
+  - 2 stocks * quick: ~18-26 seconds
+  - 2 stocks * deep: 40-60 seconds
+
+CONCURRENT REQUESTS:
+
+API server is single-threaded at LLM level (Gemini has rate limits).
+Multiple concurrent requests will queue, not parallelize.
+Consider:
+  - Running multiple uvicorn workers (uvicorn --workers 4)
+  - Or accept 10-30s latency per request
+
+DATA CACHING:
+
+Currently: No caching. Each request fetches fresh Yahoo data.
+Potential optimization: Cache Yahoo snapshot for 1 minute per ticker.
+Not implemented to ensure real-time accuracy.
+
+================================================================================
+SECTION 13: TESTING & DEBUGGING TIPS
+================================================================================
+
+UNIT TEST EXAMPLE (Investment Advisor Guardrails):
+
+```python
+from agent4_investment_advisor import _apply_bearish_guardrails
+from agent4_utils import StructuredDecision
+
+# Test case: High bearish pressure should cap conviction and force HOLD
+stock_data = {
+    'price': 95, 'ma50': 100, 'ma200': 120, 'rsi14': 35
+}
+signals = {
+    'trend': 'BEARISH',
+    'signal': 'SELL',
+    'fund_view': 'SELL'
+}
+decision = StructuredDecision(
+    verdict='BUY',
+    conviction=8,
+    risk='LOW',
+    position_size_pct=3.5,
+    time_horizon='MEDIUM'
+)
+
+updated, notes = _apply_bearish_guardrails(decision, signals, stock_data)
+print(f"Updated verdict: {updated.verdict}")  # Should be HOLD
+print(f"Updated conviction: {updated.conviction}")  # Should be 4 (pressure=5)
+print(f"Updated risk: {updated.risk}")  # Should be HIGH
+assert updated.verdict == 'HOLD'
+assert updated.conviction == 4
+print("✓ Guardrail test passed")
+```
+
+DEBUG LOGGING:
+
+Enable debug output in llm_client.py:
+  import logging
+  logging.basicConfig(level=logging.DEBUG)
+
+Check retry logic:
+  - Look for "Retrying..." messages with exponential delays
+  - Verify model fallback selection in check_gemini() output
+
+Check bearish pressure calculation:
+  - Print _market_regime_snapshot() output
+  - Verify pressure is in [0, 5] range
+  - Confirm each component (+1) is correctly added
+
+TEST STOCK EXAMPLES:
+
+Quick BUY scenario:
+  $ python run.py NVDA
+  (High growth, strong technicals, bullish trend)
+
+Quick SELL scenario:
+  $ python run.py PYPL
+  (Declining growth, weak chart, bearish sentiment)
+
+Quick HOLD scenario:
+  $ python run.py JNJ
+  (Mature stable company, mixed signals)
+
+================================================================================
+SECTION 14: FUTURE ENHANCEMENTS & ROADMAP
+================================================================================
+
+PLANNED IMPROVEMENTS:
+
+1. Data Caching
+   - Cache Yahoo snapshots for 1-5 minutes per ticker
+   - Reduce redundant API calls in comparison mode
+
+2. Multi-ticker Analysis
+   - Batch analysis of 5-10 stocks in one run
+   - Sector comparison and portfolio construction
+
+3. Interactive Refinement
+   - User can adjust conviction, risk assumptions
+   - Re-run guardrails with custom parameters
+
+4. Backtesting
+   - Historical analysis: did past recommendations outperform?
+   - Attribution: which signals were predictive?
+
+5. Real-time Monitoring
+   - WebSocket updates as signals change
+   - Alerts if guardrail conditions triggered
+
+6. Integration APIs
+   - Broker APIs (IB, TD Ameritrade, Alpaca)
+   - Auto-execute trades based on recommendations
+   - Risk limit enforcement
+
+7. Portfolio Optimization
+   - Suggest position sizes for multiple stocks
+   - Correlation and sector diversification
+   - Max drawdown constraints
+
+================================================================================
+SECTION 15: LEGAL & DISCLAIMERS
+================================================================================
+
+This is a TEACHING/DEMO SYSTEM and does NOT provide financial advice.
+
+IMPORTANT:
+- Do not rely solely on this system for investment decisions.
+- Always conduct your own due diligence and research.
+- Consult a qualified financial advisor before investing.
+- Past performance does not guarantee future results.
+- All analysis is based on historical data and LLM interpretation.
+- Market conditions change rapidly; recommendations may become stale.
+- Risks: concentration, liquidity, currency, geopolitical, regulatory.
+
+LIABILITY:
+The authors, maintainers, and contributors assume no liability for
+financial losses, market losses, or any negative outcomes resulting
+from use of this system or its outputs.
+
+USE AT YOUR OWN RISK.
+
+================================================================================
+END OF DOCUMENTATION
+================================================================================
+Project: Stock Market Analysis Multi-Agent Pipeline
+Version: 1.0 (Teaching/Demo Release)
+Last Updated: April 14, 2026
+Status: Active Development
+
+For questions or issues, refer to README.md or review the source code directly.
+All core logic is intentionally kept simple and transparent for educational purposes.
+================================================================================

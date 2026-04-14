@@ -132,6 +132,219 @@ def _clamp_score(value: Any, low: int = 1, high: int = 5) -> int:
     return max(low, min(high, n))
 
 
+def _to_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    return out
+
+
+def _market_regime_snapshot(signals: dict[str, Any], stock_data: dict[str, Any]) -> dict[str, Any]:
+    trend = str(signals.get("trend", "UNKNOWN") or "UNKNOWN").upper()
+    technical = str(signals.get("signal", "UNKNOWN") or "UNKNOWN").upper()
+    fundamental = str(signals.get("fund_view", "UNKNOWN") or "UNKNOWN").upper()
+
+    price = _to_float(stock_data.get("price"))
+    ma50 = _to_float(stock_data.get("ma50"))
+    ma200 = _to_float(stock_data.get("ma200"))
+    rsi = _to_float(stock_data.get("rsi14"))
+
+    structure = "mixed"
+    if price is not None and ma50 is not None and ma200 is not None:
+        if price >= ma50 >= ma200:
+            structure = "bullish"
+        elif price <= ma50 <= ma200:
+            structure = "bearish"
+
+    bearish_pressure = 0
+    if trend == "BEARISH":
+        bearish_pressure += 1
+    if technical == "SELL":
+        bearish_pressure += 1
+    if fundamental == "SELL":
+        bearish_pressure += 1
+    if structure == "bearish":
+        bearish_pressure += 1
+    if rsi is not None and rsi <= 45:
+        bearish_pressure += 1
+
+    return {
+        "trend": trend,
+        "technical": technical,
+        "fundamental": fundamental,
+        "price": price,
+        "ma50": ma50,
+        "ma200": ma200,
+        "rsi": rsi,
+        "structure": structure,
+        "bearish_pressure": bearish_pressure,
+    }
+
+
+def _apply_bearish_guardrails(
+    decision: StructuredDecision,
+    signals: dict[str, Any],
+    stock_data: dict[str, Any],
+) -> tuple[StructuredDecision, list[str]]:
+    snap = _market_regime_snapshot(signals, stock_data)
+    pressure = int(snap.get("bearish_pressure", 0) or 0)
+    trend = str(snap.get("trend", "UNKNOWN") or "UNKNOWN")
+    technical = str(snap.get("technical", "UNKNOWN") or "UNKNOWN")
+    fundamental = str(snap.get("fundamental", "UNKNOWN") or "UNKNOWN")
+    structure = str(snap.get("structure", "mixed") or "mixed")
+
+    bullish_confirmation = 0
+    if trend == "BULLISH":
+        bullish_confirmation += 1
+    if technical == "BUY":
+        bullish_confirmation += 1
+    if fundamental == "BUY":
+        bullish_confirmation += 1
+    if structure == "bullish":
+        bullish_confirmation += 1
+
+    verdict = decision.verdict
+    conviction = int(decision.conviction)
+    risk = decision.risk
+    notes: list[str] = []
+
+    # Capital-preservation first: require strong multi-signal confirmation for BUY.
+    if verdict == "BUY" and bullish_confirmation < 3:
+        verdict = "HOLD"
+        notes.append("Verdict downgraded BUY -> HOLD due to insufficient bullish confirmation.")
+
+    # In bearish regimes, disallow aggressive long calls.
+    if pressure >= 2 and verdict == "BUY":
+        verdict = "HOLD"
+        notes.append("Verdict downgraded BUY -> HOLD due to bearish regime pressure.")
+
+    # In strong bearish regimes with technical weakness, force defensive stance.
+    if pressure >= 4 and technical == "SELL" and verdict != "SELL":
+        verdict = "SELL"
+        notes.append("Verdict downgraded to SELL under strong bearish regime plus technical SELL.")
+
+    if pressure >= 2 and conviction > 7:
+        conviction = 7
+        notes.append("Conviction capped at 7 due to mild bearish regime pressure.")
+
+    if pressure >= 3 and conviction > 6:
+        conviction = 6
+        notes.append("Conviction capped at 6 due to bearish regime pressure.")
+
+    if pressure >= 4 and conviction > 4:
+        conviction = 4
+        notes.append("Conviction capped at 4 under strong bearish regime pressure.")
+
+    if pressure >= 2 and risk == "LOW":
+        risk = "MEDIUM"
+        notes.append("Risk raised LOW -> MEDIUM under bearish regime pressure.")
+    if pressure >= 4 and risk != "HIGH":
+        risk = "HIGH"
+        notes.append("Risk raised MEDIUM -> HIGH under strong bearish regime pressure.")
+
+    expected_position = derive_position_size(conviction, risk)
+    if verdict == "SELL":
+        target_position = 0.5
+    elif verdict == "HOLD":
+        target_position = min(expected_position, 2.0)
+    else:
+        target_position = min(expected_position, 4.5)
+
+    position_size = min(float(decision.position_size_pct), target_position)
+    if abs(position_size - float(decision.position_size_pct)) > 0.25:
+        notes.append(
+            f"Position size reduced {decision.position_size_pct:.2f}% -> {position_size:.2f}% due to bearish regime guardrail."
+        )
+
+    updated = StructuredDecision(
+        verdict=verdict,
+        conviction=conviction,
+        risk=risk,
+        position_size_pct=position_size,
+        time_horizon=decision.time_horizon,
+    )
+    return updated, notes
+
+
+def _apply_rubric_regime_penalty(
+    rubric_scores: dict[str, Any],
+    decision: StructuredDecision,
+    signals: dict[str, Any],
+    stock_data: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(rubric_scores, dict) or not rubric_scores:
+        return rubric_scores
+
+    snap = _market_regime_snapshot(signals, stock_data)
+    pressure = int(snap.get("bearish_pressure", 0) or 0)
+    if pressure < 3:
+        return rubric_scores
+
+    criteria_in = rubric_scores.get("criteria", {}) if isinstance(rubric_scores.get("criteria"), dict) else {}
+    raw: dict[str, Any] = {}
+    for key in RUBRIC_CRITERIA:
+        item = criteria_in.get(key, {}) if isinstance(criteria_in, dict) else {}
+        score = _clamp_score(item.get("score", 1)) if isinstance(item, dict) else _clamp_score(item)
+        note = str(item.get("note", "")).strip() if isinstance(item, dict) else ""
+        raw[key] = {"score": score, "note": note}
+
+    changed = False
+    if decision.verdict == "BUY":
+        if raw["trend_relevance"]["score"] > 2:
+            raw["trend_relevance"]["score"] = 2
+            raw["trend_relevance"]["note"] = "Penalized: BUY conflicts with bearish regime pressure."
+            changed = True
+        if raw["visual_text_alignment"]["score"] > 2:
+            raw["visual_text_alignment"]["score"] = 2
+            raw["visual_text_alignment"]["note"] = "Penalized: decision coherence is weak under bearish regime pressure."
+            changed = True
+        if raw["quote_quality"]["score"] > 4:
+            raw["quote_quality"]["score"] = 4
+            changed = True
+
+    if decision.verdict == "HOLD" and pressure >= 3:
+        if raw["trend_relevance"]["score"] > 3:
+            raw["trend_relevance"]["score"] = 3
+            raw["trend_relevance"]["note"] = "Capped: HOLD under bearish regime should not receive top trend score."
+            changed = True
+        if raw["visual_text_alignment"]["score"] > 3:
+            raw["visual_text_alignment"]["score"] = 3
+            raw["visual_text_alignment"]["note"] = "Capped: defensive posture expected under bearish regime."
+            changed = True
+        if raw["quote_quality"]["score"] > 4:
+            raw["quote_quality"]["score"] = 4
+            changed = True
+
+    if pressure >= 4 and decision.verdict in {"BUY", "HOLD"}:
+        if raw["trend_relevance"]["score"] > 2:
+            raw["trend_relevance"]["score"] = 2
+            changed = True
+        if raw["visual_text_alignment"]["score"] > 2:
+            raw["visual_text_alignment"]["score"] = 2
+            changed = True
+        if raw["sector_trend_fit"]["score"] > 4:
+            raw["sector_trend_fit"]["score"] = 4
+            changed = True
+        if raw["quote_quality"]["score"] > 3:
+            raw["quote_quality"]["score"] = 3
+            changed = True
+        if raw["report_completeness"]["score"] > 4:
+            raw["report_completeness"]["score"] = 4
+            changed = True
+
+    if not changed:
+        return rubric_scores
+
+    improvements = rubric_scores.get("top_improvements", [])
+    imp_lines = [str(x).strip() for x in improvements if str(x).strip()] if isinstance(improvements, list) else []
+    imp_lines.insert(0, "Respect bearish regime guardrails before assigning high confidence bullish calls.")
+    raw["top_improvements"] = imp_lines[:5]
+
+    source = str(rubric_scores.get("source") or "deterministic")
+    return _normalize_rubric_payload(raw, source=source)
+
+
 def _grade_from_normalized(score_100: int) -> str:
     if score_100 >= 90:
         return "A"
@@ -292,6 +505,8 @@ def _deterministic_rubric_scores(
     text = (report_text or "")
     lower = text.lower()
 
+    snap = _market_regime_snapshot(signals, stock_data)
+
     trend = str(signals.get("trend", "UNKNOWN") or "UNKNOWN").upper()
     technical_signal = str(signals.get("signal", "UNKNOWN") or "UNKNOWN").upper()
     fund_view = str(signals.get("fund_view", "UNKNOWN") or "UNKNOWN").upper()
@@ -304,17 +519,7 @@ def _deterministic_rubric_scores(
         "UNKNOWN": "HOLD",
     }.get(trend, "HOLD")
 
-    structure = "mixed"
-    try:
-        price = float(stock_data.get("price"))
-        ma50 = float(stock_data.get("ma50"))
-        ma200 = float(stock_data.get("ma200"))
-        if price >= ma50 >= ma200:
-            structure = "bullish"
-        elif price <= ma50 <= ma200:
-            structure = "bearish"
-    except Exception:
-        structure = "mixed"
+    structure = str(snap.get("structure", "mixed") or "mixed")
 
     trend_alignment = (
         (trend == "BULLISH" and structure == "bullish")
@@ -422,6 +627,12 @@ def _deterministic_rubric_scores(
     completeness_note = (
         f"Detected {present}/{len(required)} required and {optional_present}/{len(optional)} optional sections for {mode} mode."
     )
+
+    bearish_pressure = int(snap.get("bearish_pressure", 0) or 0)
+    if bearish_pressure >= 4:
+        trend_score = min(trend_score, 3)
+        if decision.verdict != "SELL":
+            visual_score = min(visual_score, 3)
 
     raw = {
         "trend_relevance": {"score": trend_score, "note": trend_note},
@@ -552,6 +763,8 @@ def _build_pass1_prompt(
         "hard_rule": "If technical signal is SELL with HIGH confidence, BUY is forbidden.",
         "signal_conflict_rule": "If signals conflict, conviction must be downgraded.",
         "alignment_rule": "If all signals align, conviction may be increased.",
+        "capital_preservation_rule": "Prioritize drawdown control over upside chasing; prefer HOLD/SELL unless BUY is strongly supported.",
+        "bearish_structure_rule": "If trend is BEARISH and price <= MA50 <= MA200, do not issue aggressive BUY.",
     }
 
     sections = (
@@ -854,8 +1067,9 @@ def synthesize_report(ticker: str, company: str, stock_data: dict,
 
         decision, rule_overrides = apply_rule_overrides(decision, rules)
         decision, consistency_notes = enforce_consistency(decision, stock_data)
+        decision, regime_notes = _apply_bearish_guardrails(decision, signal_map, stock_data)
 
-        override_notes = rule_overrides + consistency_notes
+        override_notes = rule_overrides + consistency_notes + regime_notes
         if override_notes:
             logger.warning("Governance overrides: %s", override_notes)
             human_report = (
@@ -873,6 +1087,7 @@ def synthesize_report(ticker: str, company: str, stock_data: dict,
             mode=mode,
             use_llm=True,
         )
+        rubric_scores = _apply_rubric_regime_penalty(rubric_scores, decision, signal_map, stock_data)
         if not rubric_critique:
             rubric_critique = _rubric_feedback_for_revision(rubric_scores)
         if not rubric_critique and rubric_judge_output:
@@ -930,7 +1145,8 @@ def synthesize_report(ticker: str, company: str, stock_data: dict,
 
         decision, rule_overrides = apply_rule_overrides(base_decision, rules)
         decision, consistency_notes = enforce_consistency(decision, stock_data)
-        override_notes = rule_overrides + consistency_notes
+        decision, regime_notes = _apply_bearish_guardrails(decision, signal_map, stock_data)
+        override_notes = rule_overrides + consistency_notes + regime_notes
 
         market_evidence = _bullet_block(
             _extract_evidence_lines(market_report, limit=5 if mode == "deep" else 3),
@@ -1071,6 +1287,7 @@ This is not financial advice.
             stock_data=stock_data,
             mode=mode,
         )
+        rubric_scores = _apply_rubric_regime_penalty(rubric_scores, decision, signal_map, stock_data)
 
         return {
             "report": final_report,

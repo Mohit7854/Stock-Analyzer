@@ -45,6 +45,14 @@ RUBRIC_CRITERIA: dict[str, str] = {
     "report_completeness": "Report Completeness",
 }
 
+RUBRIC_BAND_GUIDANCE = {
+    5: "excellent evidence quality, coherence, and coverage",
+    4: "strong but with minor gaps",
+    3: "adequate with visible weaknesses",
+    2: "weak and under-supported",
+    1: "materially deficient",
+}
+
 QUICK_REQUIRED_SECTIONS = [
     "Executive Summary",
     "Final Recommendation",
@@ -179,6 +187,101 @@ def _normalize_rubric_payload(raw: dict[str, Any], source: str) -> dict[str, Any
     }
 
 
+def _rubric_prompt_block(mode: str) -> str:
+    mode = (mode or "quick").strip().lower()
+    criteria_lines = "\n".join(
+        f"- {label}: score 1-5 where 5={RUBRIC_BAND_GUIDANCE[5]}, 3={RUBRIC_BAND_GUIDANCE[3]}, 1={RUBRIC_BAND_GUIDANCE[1]}."
+        for label in RUBRIC_CRITERIA.values()
+    )
+
+    mode_note = (
+        "Deep mode must explicitly show evidence weighting, disconfirming evidence, and thesis invalidation conditions."
+        if mode == "deep"
+        else "Quick mode should remain concise while preserving clear evidence-backed reasoning."
+    )
+
+    return (
+        "Rubric targets (optimize your report for these criteria):\n"
+        f"{criteria_lines}\n"
+        "Do not write generic text: calibrate arguments to the stock-specific metrics and signals provided.\n"
+        f"{mode_note}"
+    )
+
+
+def _rubric_feedback_for_revision(rubric_scores: dict[str, Any]) -> str:
+    if not isinstance(rubric_scores, dict):
+        return ""
+
+    criteria = rubric_scores.get("criteria", {}) if isinstance(rubric_scores.get("criteria"), dict) else {}
+    weak: list[str] = []
+    for key, label in RUBRIC_CRITERIA.items():
+        item = criteria.get(key, {}) if isinstance(criteria, dict) else {}
+        score = _clamp_score(item.get("score", 1)) if isinstance(item, dict) else _clamp_score(item)
+        note = str(item.get("note", "")).strip() if isinstance(item, dict) else ""
+        if score <= 3:
+            detail = f"{label}: {score}/5"
+            if note:
+                detail += f" ({note})"
+            weak.append(detail)
+
+    improvements = rubric_scores.get("top_improvements", [])
+    imp_lines = [str(x).strip() for x in improvements if str(x).strip()] if isinstance(improvements, list) else []
+
+    parts: list[str] = []
+    if weak:
+        parts.append("Weak rubric areas to fix:\n" + "\n".join(f"- {line}" for line in weak))
+    if imp_lines:
+        parts.append("Top improvements:\n" + "\n".join(f"- {line}" for line in imp_lines[:4]))
+    if not parts:
+        parts.append("Rubric shows strong quality; preserve evidence density and decision consistency.")
+    return "\n\n".join(parts)
+
+
+def _metric_anchor_hits(text: str, stock_data: dict[str, Any]) -> int:
+    anchors = [
+        stock_data.get("price"),
+        stock_data.get("ma50"),
+        stock_data.get("ma200"),
+        stock_data.get("rsi14"),
+        stock_data.get("trailing_pe"),
+        stock_data.get("revenue_growth_pct"),
+        stock_data.get("earnings_growth_pct"),
+        stock_data.get("beta"),
+        stock_data.get("volatility_annual_pct"),
+        stock_data.get("debt_to_equity"),
+        stock_data.get("profit_margin_pct"),
+    ]
+
+    hits = 0
+    text_l = (text or "").lower()
+
+    for value in anchors:
+        try:
+            num = float(value)
+        except Exception:
+            continue
+
+        variants = {
+            f"{num:.0f}",
+            f"{num:.1f}",
+            f"{num:.2f}",
+        }
+        if abs(num) >= 1000:
+            variants.add(f"{num:,.0f}")
+            variants.add(f"{num:,.1f}")
+
+        normalized_variants = set()
+        for v in variants:
+            vv = v.rstrip("0").rstrip(".") if "." in v else v
+            if vv:
+                normalized_variants.add(vv.lower())
+
+        if any(v in text_l for v in normalized_variants):
+            hits += 1
+
+    return hits
+
+
 def _deterministic_rubric_scores(
     report_text: str,
     decision: StructuredDecision,
@@ -190,56 +293,122 @@ def _deterministic_rubric_scores(
     lower = text.lower()
 
     trend = str(signals.get("trend", "UNKNOWN") or "UNKNOWN").upper()
-    trend_score = 2
-    trend_note = "Trend signal availability is limited."
+    technical_signal = str(signals.get("signal", "UNKNOWN") or "UNKNOWN").upper()
+    fund_view = str(signals.get("fund_view", "UNKNOWN") or "UNKNOWN").upper()
+    confidence = str(signals.get("confidence", "UNKNOWN") or "UNKNOWN").upper()
+
+    trend_vote = {
+        "BULLISH": "BUY",
+        "BEARISH": "SELL",
+        "NEUTRAL": "HOLD",
+        "UNKNOWN": "HOLD",
+    }.get(trend, "HOLD")
+
+    structure = "mixed"
+    try:
+        price = float(stock_data.get("price"))
+        ma50 = float(stock_data.get("ma50"))
+        ma200 = float(stock_data.get("ma200"))
+        if price >= ma50 >= ma200:
+            structure = "bullish"
+        elif price <= ma50 <= ma200:
+            structure = "bearish"
+    except Exception:
+        structure = "mixed"
+
+    trend_alignment = (
+        (trend == "BULLISH" and structure == "bullish")
+        or (trend == "BEARISH" and structure == "bearish")
+        or (trend == "NEUTRAL" and structure == "mixed")
+    )
+
+    trend_checks = 0
     if trend in {"BULLISH", "BEARISH", "NEUTRAL"}:
-        trend_score = 4
-        trend_note = f"Detected trend is {trend} and was incorporated in synthesis."
-        if "trend" in lower:
-            trend_score = 5
+        trend_checks += 1
+    if "trend" in lower or trend.lower() in lower:
+        trend_checks += 1
+    if technical_signal == trend_vote:
+        trend_checks += 1
+    if trend_alignment:
+        trend_checks += 1
+    if confidence in {"HIGH", "MEDIUM", "LOW"} and confidence.lower() in lower:
+        trend_checks += 1
+
+    trend_score = max(1, min(5, trend_checks))
+    trend_note = f"Trend checks={trend_checks}/5; structure={structure}; trend-alignment={'yes' if trend_alignment else 'no'}."
 
     sector = str(stock_data.get("sector") or "").strip()
     industry = str(stock_data.get("industry") or "").strip()
-    sector_score = 2
+    sector_score = 1
     sector_note = "Sector/industry linkage in thesis is limited."
     if sector or industry:
-        sector_score = 3
-        sector_note = "Sector or industry context is present in the data inputs."
-        if (sector and sector.lower() in lower) or (industry and industry.lower() in lower):
-            sector_score = 4
-            sector_note = "Report narrative references sector/industry context explicitly."
-        if "signal decomposition" in lower or "valuation" in lower:
-            sector_score = min(5, sector_score + 1)
+        sector_score = 2
+        mentions = 0
+        if sector and sector.lower() in lower:
+            mentions += 1
+        if industry and industry.lower() in lower:
+            mentions += 1
+        if "sector" in lower or "industry" in lower:
+            mentions += 1
+        if "trend" in lower and ("demand" in lower or "cycle" in lower or "macro" in lower):
+            mentions += 1
+        sector_score = min(5, sector_score + mentions)
+        sector_note = f"Sector/industry contextual linkage signals found: {mentions}."
 
     alignment_checks = 0
-    if str(decision.verdict).upper() in lower:
+    if str(decision.verdict).lower() in lower:
         alignment_checks += 1
-    if str(decision.risk).upper() in lower:
+    if str(decision.risk).lower() in lower:
         alignment_checks += 1
     if "conviction" in lower:
         alignment_checks += 1
     if "position" in lower or str(decision.position_size_pct) in text:
         alignment_checks += 1
-    visual_score = max(1, min(5, alignment_checks + 1))
-    visual_note = "Narrative and structured decision fields show moderate consistency."
-    if visual_score >= 4:
-        visual_note = "Narrative and structured decision fields are strongly aligned."
+    if str(decision.time_horizon).lower() in lower:
+        alignment_checks += 1
+
+    coherence = 0
+    if decision.verdict == technical_signal and technical_signal in {"BUY", "HOLD", "SELL"}:
+        coherence += 1
+    if decision.verdict == fund_view and fund_view in {"BUY", "HOLD", "SELL"}:
+        coherence += 1
+    if decision.verdict == trend_vote:
+        coherence += 1
+
+    if decision.risk == "HIGH" and decision.conviction <= 6:
+        coherence += 1
+    elif decision.risk == "LOW" and decision.conviction >= 5:
+        coherence += 1
+    elif decision.risk == "MEDIUM":
+        coherence += 1
+
+    if decision.risk == "HIGH" and decision.position_size_pct <= 4.5:
+        coherence += 1
+    elif decision.risk in {"LOW", "MEDIUM"} and decision.position_size_pct >= 2.5:
+        coherence += 1
+
+    visual_score = max(1, min(5, round((alignment_checks + coherence) / 2)))
+    visual_note = f"Narrative checks={alignment_checks}/5; decision-coherence checks={coherence}/5."
 
     metric_refs = len(re.findall(r"\b\d+(?:\.\d+)?%?\b", text))
+    anchor_hits = _metric_anchor_hits(text, stock_data)
+    density = metric_refs + (anchor_hits * 2)
     quote_score = 1
-    if metric_refs >= 16:
+    if density >= 24:
         quote_score = 5
-    elif metric_refs >= 10:
+    elif density >= 15:
         quote_score = 4
-    elif metric_refs >= 6:
+    elif density >= 9:
         quote_score = 3
-    elif metric_refs >= 3:
+    elif density >= 4:
         quote_score = 2
-    quote_note = f"Found {metric_refs} numeric references in the report."
+    quote_note = f"Found {metric_refs} numeric refs and {anchor_hits} stock-metric anchors in report text."
 
     required = DEEP_REQUIRED_SECTIONS if mode == "deep" else QUICK_REQUIRED_SECTIONS
+    optional = ["Caveats", "Disclaimer"] if mode == "deep" else ["Catalysts to Watch", "Disclaimer"]
     present = sum(1 for s in required if s.lower() in lower)
-    completeness_ratio = present / max(1, len(required))
+    optional_present = sum(1 for s in optional if s.lower() in lower)
+    completeness_ratio = (present + 0.5 * optional_present) / max(1, len(required) + 0.5 * len(optional))
     if completeness_ratio >= 0.95:
         completeness_score = 5
     elif completeness_ratio >= 0.75:
@@ -250,7 +419,9 @@ def _deterministic_rubric_scores(
         completeness_score = 2
     else:
         completeness_score = 1
-    completeness_note = f"Detected {present}/{len(required)} expected sections for {mode} mode."
+    completeness_note = (
+        f"Detected {present}/{len(required)} required and {optional_present}/{len(optional)} optional sections for {mode} mode."
+    )
 
     raw = {
         "trend_relevance": {"score": trend_score, "note": trend_note},
@@ -280,6 +451,7 @@ def _build_rubric_critique_prompt(
     return f"""You are a strict LLM-as-Judge for equity research quality.
 
 Evaluate this report using a 1-5 rubric per criterion.
+Calibrate scores to report evidence only; avoid defaulting to identical scores across criteria or stocks.
 
 REPORT:
 {report_text}
@@ -323,7 +495,7 @@ def _judge_rubric_scores(
     baseline = _deterministic_rubric_scores(report_text, decision, signals, stock_data, mode)
     critique_text = ""
 
-    if not use_llm or mode != "deep":
+    if not use_llm:
         return baseline, critique_text
 
     try:
@@ -335,6 +507,12 @@ def _judge_rubric_scores(
             system="Score strictly by rubric and return clean JSON.",
         )
         raw = extract_first_json_object(critique_text, marker="RUBRIC_JSON")
+        if isinstance(raw, dict) and isinstance(raw.get("RUBRIC_JSON"), dict):
+            raw = raw.get("RUBRIC_JSON")
+        if not isinstance(raw, dict) or not raw:
+            raw = extract_first_json_object(critique_text)
+            if isinstance(raw, dict) and isinstance(raw.get("RUBRIC_JSON"), dict):
+                raw = raw.get("RUBRIC_JSON")
         if isinstance(raw, dict) and raw:
             return _normalize_rubric_payload(raw, source="llm_judge"), critique_text
     except Exception:
@@ -378,13 +556,14 @@ def _build_pass1_prompt(
 
     sections = (
         "## Executive Summary\n"
-        "## Investment Variant Perception\n"
         "## Signal Decomposition (Market vs Technical vs Fundamental)\n"
-        "## Valuation and Return Driver Framework\n"
+        "## Data Snapshot\n"
+        "## Evidence Ledger\n"
         "## 12-Month Scenario Matrix (Bull/Base/Bear with assumptions and probability)\n"
         "## Risk Register with Mitigants\n"
         "## Position Sizing and Risk Controls\n"
         "## Monitoring Checklist (30/90/180 days)\n"
+        "## Final Recommendation\n"
         "## Caveats\n"
         "## Disclaimer"
         if deep
@@ -404,6 +583,7 @@ def _build_pass1_prompt(
         if deep else
         "Keep the analysis practical and concise."
     )
+    rubric_guidance = _rubric_prompt_block(mode)
 
     context_window = 3600 if deep else 2200
 
@@ -439,6 +619,7 @@ Write a robust report with these sections:
 {sections}
 
 {depth_guidance}
+{rubric_guidance}
 
 After the human-readable report, append exactly:
 DECISION_JSON:
@@ -498,6 +679,7 @@ def _build_revision_prompt(
 ) -> str:
     mode = (mode or "quick").strip().lower()
     deep = mode == "deep"
+    rubric_guidance = _rubric_prompt_block(mode)
 
     deep_requirements = (
         "Revision requirements for deep mode:\n"
@@ -544,7 +726,8 @@ DECISION_JSON:
 
 Ensure DECISION_JSON matches the report narrative.
 
-{deep_requirements}"""
+{deep_requirements}
+{rubric_guidance}"""
 
 
 def _clean_report_and_decision(revised_report: str) -> tuple[str, dict[str, Any]]:
@@ -636,13 +819,18 @@ def synthesize_report(ticker: str, company: str, stock_data: dict,
                 system="You are an unforgiving investment committee reviewer.",
             )
 
-            rubric_prompt = _build_rubric_critique_prompt(pass1_report, pass1_decision_json, signal_map, stock_data)
-            rubric_critique = _llm(
-                rubric_prompt,
-                max_tokens=900,
-                agent_tag=f"{TAG}-Judge",
-                system="Audit by rubric and return concise JSON.",
+            pass1_decision = parse_structured_decision(pass1_decision_json, pass1_report)
+            pass1_rubric_scores, pass1_judge_output = _judge_rubric_scores(
+                report_text=pass1_report,
+                decision=pass1_decision,
+                signals=signal_map,
+                stock_data=stock_data,
+                mode=mode,
+                use_llm=True,
             )
+            rubric_critique = _rubric_feedback_for_revision(pass1_rubric_scores)
+            if not rubric_critique and pass1_judge_output:
+                rubric_critique = pass1_judge_output
 
             revision_prompt = _build_revision_prompt(
                 ticker=ticker,
@@ -683,8 +871,10 @@ def synthesize_report(ticker: str, company: str, stock_data: dict,
             signals=signal_map,
             stock_data=stock_data,
             mode=mode,
-            use_llm=(mode == "deep"),
+            use_llm=True,
         )
+        if not rubric_critique:
+            rubric_critique = _rubric_feedback_for_revision(rubric_scores)
         if not rubric_critique and rubric_judge_output:
             rubric_critique = rubric_judge_output
 
@@ -826,6 +1016,15 @@ This is not financial advice.
             final_report = f"""# Equity Research - {ticker} ({company})
 ## Executive Summary
 This report uses deterministic signal aggregation across market, technical, and fundamental signals.
+
+## Data Snapshot
+- Price: {stock_data.get('price')} {stock_data.get('currency')}
+- RSI14: {stock_data.get('rsi14')}
+- MA50 / MA200: {stock_data.get('ma50')} / {stock_data.get('ma200')}
+- Trailing PE: {stock_data.get('trailing_pe')}
+- Revenue growth %: {stock_data.get('revenue_growth_pct')}
+- Earnings growth %: {stock_data.get('earnings_growth_pct')}
+- Sector / Industry: {stock_data.get('sector')} / {stock_data.get('industry')}
 
 ## Final Recommendation
 Verdict: {decision.verdict}

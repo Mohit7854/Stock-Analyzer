@@ -120,8 +120,8 @@ Scoring model:
 
 Quick mode rubric behavior:
 
-- Uses deterministic scoring only.
-- Checks signal/report alignment, section completeness, metric density, and decision-text consistency.
+- Uses the LLM judge pass when available, with deterministic fallback.
+- Keeps latency lower than deep mode by using single-pass synthesis and concise rubric prompting.
 
 Deep mode rubric behavior:
 

@@ -76,6 +76,22 @@ python run.py "asian paints" "mrf"
 python run.py "compare asian paints and mrf"
 ```
 
+## Recent Updates
+
+### v2.0 Features
+
+- **Report Export (NEW)**: Download analyses as markdown files directly from the web UI
+  - Analyze tab: Download after running an analysis
+  - History tab: Download any previously saved report
+  - Formats: `{TICKER}_{DATE}.md` or `{STOCK_A}_vs_{STOCK_B}_{DATE}.md`
+
+- **Enhanced Documentation (NEW)**: Comprehensive `info.txt` with detailed explanations
+  - Step-by-step guardrail rule walkthroughs
+  - Real-world examples for pressure calculation
+  - Position sizing formulas and examples
+  - Complete rubric scoring methodology
+  - Signal alignment scenarios
+
 ## API reference
 
 Endpoints:
@@ -169,15 +185,27 @@ curl -X POST http://127.0.0.1:8000/compare \
 
 The UI is served directly by FastAPI at `GET /`.
 
-Features:
+### Tabs
 
-- Single stock analysis
-- Two-stock comparison
-- Quick/deep synthesis mode
-- Health badge
-- Structured summary cards
-- Rubric grade badge and criterion breakdown (when available)
-- In-browser report history
+- **Analyze**: Real-time stock analysis. Run a single analysis or comparison, view results, and download the report as markdown.
+- **History**: View all saved reports (stored in browser localStorage). Each report can be re-downloaded at any time.
+
+### Features
+
+- **Single stock analysis**: Ticker or company name lookup with full multi-stage synthesis
+- **Two-stock comparison**: Side-by-side analysis with winner determination and detailed rubric comparison
+- **Quick/deep synthesis mode**: Toggle execution profile (quick ~10-15s, deep ~30-45s)
+- **Health badge**: Real-time service status and key validation indicators
+- **Structured summary cards**: Market trend, technical signal, fundamental view, and investment recommendation
+- **Rubric grade badge**: Quality assessment with criterion-by-criterion breakdown (when available)
+- **In-browser report history**: Persistent storage of up to 100+ reports using localStorage
+- **Report download** (NEW): Export reports as markdown files directly from Analyze tab (after analysis) or History tab (for saved reports)
+  - Single analysis: `{TICKER}_{DATE}.md`
+  - Comparison: `{STOCK_A}_vs_{STOCK_B}_{DATE}.md`
+
+### Downloading Reports
+
+After running an analysis in the **Analyze** tab, click the "Download Report" button to save the analysis as a markdown file. You can also download any previously saved report from the **History** tab by clicking its download button.
 
 ## Deploy to Vercel
 
@@ -234,21 +262,35 @@ Steps:
 
 ```text
 .
-├── api_service.py
-├── run.py
-├── llm_client.py
-├── market_data.py
-├── agent1_market_research.py
-├── agent2_technical_analyst.py
-├── agent3_fundamental_analyst.py
-├── agent4_investment_advisor.py
-├── agent4_utils.py
-├── ui/
-├── requirements.txt
-├── Dockerfile
-├── start.sh
-└── README.md
+├── api_service.py              # FastAPI app with all endpoints
+├── run.py                       # CLI orchestrator
+├── llm_client.py               # Gemini API wrapper
+├── market_data.py              # Yahoo Finance + Tavily integration
+├── agent1_market_research.py   # Market data and trend research
+├── agent2_technical_analyst.py # Technical indicators and signals
+├── agent3_fundamental_analyst.py # Valuation and growth analysis
+├── agent4_investment_advisor.py  # Final synthesis and risk governance
+├── agent4_utils.py             # Guardrail rules and position sizing
+├── ui/                         # Web UI (HTML, CSS, JS)
+├── requirements.txt            # Python dependencies
+├── info.txt                    # Comprehensive project documentation
+├── Dockerfile                  # Container build specification
+├── start.sh                    # Container startup script
+└── README.md                   # This file
 ```
+
+## Documentation
+
+For comprehensive understanding of the system internals, including detailed explanations of:
+
+- **Bearish Pressure Calculation**: 5-component pressure model with real-world examples
+- **Guardrail Rules**: Capital preservation logic with 4 major rules and sub-conditions
+- **Conviction Scale**: 1-10 scale with probability mapping and capping rationale
+- **Position Sizing**: Base calculation with verdict capping and portfolio examples
+- **Rubric Scoring**: 5-criterion quality assessment methodology
+- **Signal Alignment**: Multi-signal requirements and real-world scenarios
+
+See `info.txt` in the project root.
 
 ## Security notes
 

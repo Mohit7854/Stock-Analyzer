@@ -1,0 +1,323 @@
+Task Decomposition and Specs
+
+Version: 1.0
+Date: 2026-04-22
+Project: Stock Market Analysis Multi-Agent Pipeline
+
+1) Purpose
+Define the end-to-end job of the agent system: convert natural-language stock input into a structured, decision-ready investment output (single stock or two-stock comparison) with governance checks, risk controls, and reproducible fallbacks.
+
+2) Scope
+In scope:
+- Single-stock analysis
+- Two-stock comparison
+- Quick and deep synthesis modes
+- Deterministic safety and fallback logic
+- API, CLI, and UI-facing structured outputs
+
+Out of scope:
+- Portfolio optimization across many assets
+- Order execution or brokerage integration
+- Guaranteed price prediction accuracy
+
+3) Global Input Contract
+Required runtime inputs:
+- Query input: single stock query or two stock phrases
+- Mode: quick or deep (defaults to quick)
+- Save flag: true/false (optional report persistence)
+
+Required environment:
+- GEMINI_API_KEY (required)
+- GEMINI_MODEL (optional default exists)
+- GEMINI_API_VERSION (optional)
+- TAVILY_API_KEY (optional, context enrichment)
+
+4) Global Output Contract
+Single-stock primary output fields:
+- ticker, company
+- market_report, technical_report, fundamental_report
+- final_report
+- structured_output:
+  - verdict (BUY/HOLD/SELL)
+  - conviction (1-10)
+  - risk (LOW/MEDIUM/HIGH)
+  - position_size_pct (float)
+  - time_horizon (SHORT/MEDIUM/LONG)
+- signals (trend, signal, confidence, fund_view, horizon)
+- rubric (criteria scores + total/normalized + grade)
+- warnings and override notes
+
+Comparison primary output fields:
+- stock_a, stock_b (full single-stock outputs)
+- comparison_report
+- winner
+- confidence
+- comparison_meta (winner basis, rubric delta, conviction/risk diagnostics)
+
+5) Task Decomposition
+
+Task T0: Environment and model preflight
+Goal:
+- Validate Gemini connectivity before running pipeline.
+Inputs:
+- GEMINI_API_KEY, GEMINI_MODEL, GEMINI_API_VERSION, fallback model list.
+Outputs:
+- Ready/not-ready status and selected model + API version.
+Decision points:
+- If GEMINI_API_KEY missing: fail fast.
+- If configured model unavailable: try fallback models and API versions.
+Handling:
+- Iterate candidate models x API versions.
+- If unavailable, attempt model discovery endpoint.
+- Return actionable failure message if no usable model is found.
+
+Task T1: Input intake and mode normalization
+Goal:
+- Normalize user input and synthesis mode.
+Inputs:
+- Raw query or query list; optional mode.
+Outputs:
+- Sanitized query list; normalized mode (quick/deep).
+Decision points:
+- Invalid mode -> force quick.
+Handling:
+- Trim whitespace, remove empty entries.
+
+Task T2: Route to single vs comparison workflow
+Goal:
+- Decide whether to run one-stock or two-stock pipeline.
+Inputs:
+- Normalized queries from T1.
+Outputs:
+- Route: single or multi, plus resolved query pair/list.
+Decision points:
+- If >= 2 non-empty queries: comparison route.
+- If one query: run LLM intent detection for comparison.
+- If LLM parse fails: use heuristics (vs, versus, and, comma split).
+Handling:
+- Fallback to single route when comparison confidence is insufficient.
+
+Task T3: Agent 1 ticker resolution and market snapshot
+Goal:
+- Resolve natural-language query to ticker and fetch stock snapshot.
+Inputs:
+- User stock query.
+Outputs:
+- ticker, company, exchange, confidence, reasoning, stock_data.
+Decision points:
+- LLM-derived ticker hints available/unavailable.
+- Candidate resolution order success/failure.
+Handling:
+- Build candidate list from:
+  - LLM hints
+  - exchange-aware ticker variants (.NS/.BO)
+  - cleaned phrase
+  - heuristic ticker tokens
+- Try Yahoo resolver candidate-by-candidate until success.
+- If all candidates fail: raise resolution error.
+
+Task T4: Agent 1 market context + trend report
+Goal:
+- Build market report and trend classification.
+Inputs:
+- ticker/company, stock_data, mode, optional Tavily key.
+Outputs:
+- market_context, market_report, TREND line.
+Decision points:
+- Tavily key exists or not.
+- quick vs deep query depth.
+- LLM generation success/failure.
+Handling:
+- If Tavily unavailable: attach note and continue.
+- If LLM fails: deterministic trend fallback:
+  - price > MA50 > MA200 => BULLISH
+  - price < MA50 < MA200 => BEARISH
+  - else use month change threshold (+1/-1), else NEUTRAL
+
+Task T5: Agent 2 technical analysis
+Goal:
+- Produce technical report with SIGNAL and CONFIDENCE.
+Inputs:
+- Agent 1 payload, stock_data, optional Tavily technical context, mode.
+Outputs:
+- technical_context, technical_report.
+Decision points:
+- Tavily context fetch success/failure.
+- LLM generation success/failure.
+Handling:
+- Deterministic technical fallback scoring:
+  - price vs MA50
+  - MA50 vs MA200
+  - RSI regime (<35 bullish, >70 bearish)
+  - MACD vs signal
+- Score mapping:
+  - >= 2 => BUY/MEDIUM
+  - <= -2 => SELL/MEDIUM
+  - otherwise HOLD/LOW
+
+Task T6: Agent 3 fundamental analysis
+Goal:
+- Produce fundamental report with FUNDAMENTAL VIEW and HORIZON.
+Inputs:
+- Agent 2 payload, stock_data, technical report snippet, Tavily context, mode.
+Outputs:
+- fundamental_context, fundamental_report.
+Decision points:
+- Tavily context fetch success/failure.
+- LLM generation success/failure.
+Handling:
+- Deterministic fundamental fallback scoring:
+  - revenue growth
+  - earnings growth
+  - profit margin
+  - debt/equity
+  - trailing PE
+- Score mapping:
+  - >= 2 => BUY/LONG
+  - <= -2 => SELL/SHORT
+  - otherwise HOLD/MEDIUM
+
+Task T7: Agent 4 signal parsing and data validation
+Goal:
+- Extract normalized signals and validate required market fields.
+Inputs:
+- market_report, technical_report, fundamental_report, stock_data.
+Outputs:
+- Parsed signals (trend/signal/confidence/fund_view/horizon), warnings.
+Decision points:
+- Missing parse lines -> UNKNOWN values + warnings.
+- Missing critical stock data (price, ma50, ma200, rsi14) -> stop.
+Handling:
+- Regex-based robust parsing with normalization.
+- Abort synthesis on critical stock_data gaps.
+
+Task T8: Rule engine and governance overrides
+Goal:
+- Apply deterministic risk and consistency rules to final decision.
+Inputs:
+- Parsed signals, stock_data, initial decision JSON.
+Outputs:
+- Governed structured decision + override notes.
+Decision points:
+- Hard no-buy rule: technical SELL + HIGH confidence.
+- Signal conflict vs full alignment.
+- Risk floor from beta/volatility.
+- Bearish regime pressure score and caps.
+Handling:
+- Risk floor:
+  - beta >= 1.4 or vol >= 40 => HIGH
+  - beta >= 1.0 or vol >= 25 => MEDIUM
+  - else LOW
+- Position sizing base by conviction:
+  - 1-3 => 1.0%
+  - 4-5 => 2.5%
+  - 6-7 => 4.5%
+  - 8 => 6.0%
+  - 9-10 => 8.0%
+- Position cap by risk:
+  - LOW 10.0%, MEDIUM 7.0%, HIGH 4.5%
+- Bearish guardrails:
+  - BUY downgraded if bullish confirmation is weak
+  - Conviction caps tighten as bearish pressure rises
+  - Risk escalates under bearish pressure
+  - Position size constrained more aggressively for HOLD/SELL
+
+Task T9: Agent 4 report synthesis
+Goal:
+- Produce final human-readable report + DECISION_JSON.
+Inputs:
+- Agent 1-3 reports, parsed signals, stock metrics, mode, rule notes.
+Outputs:
+- final_report, structured_output, critique artifacts.
+Decision points:
+- quick mode vs deep mode workflow.
+- LLM synthesis success/failure.
+Handling:
+- Quick mode: single pass generation.
+- Deep mode: pass1 -> critique -> rubric critique -> revision.
+- Always parse DECISION_JSON and enforce consistency/governance.
+- Always append final line:
+  - FINAL VERDICT: <verdict> | CONVICTION: <n>/10 | RISK: <tier>
+- If synthesis fails: deterministic full-report fallback.
+
+Task T10: Rubric scoring and quality evaluation
+Goal:
+- Score report quality and expose rubric metadata.
+Inputs:
+- final_report, structured decision, signals, stock_data, mode.
+Outputs:
+- rubric payload:
+  - 5 criteria scores (1-5)
+  - total_score (5-25)
+  - normalized_score (0-100)
+  - grade (A-E)
+  - top_improvements
+  - source (llm_judge or deterministic)
+Decision points:
+- LLM judge available/unavailable.
+- Bearish-regime penalty conditions.
+Handling:
+- Use LLM judge when possible, deterministic fallback otherwise.
+- Apply regime-aware penalties where required.
+
+Task T11: Two-stock comparison decision
+Goal:
+- Produce winner and confidence with deterministic safety checks.
+Inputs:
+- stock_a output, stock_b output, comparison report text.
+Outputs:
+- comparison_report, winner, confidence, comparison_meta.
+Decision points:
+- Parse LLM winner/confidence lines successfully or not.
+- Rubric delta availability and magnitude.
+- LLM winner conflicts with deterministic winner.
+Handling:
+- Deterministic winner logic:
+  - If both rubric scores exist and abs(delta) >= 3: choose rubric leader.
+  - Else choose higher conviction, then lower risk.
+- Confidence scaling on rubric delta:
+  - >= 14 => HIGH
+  - >= 7 => MEDIUM
+  - else LOW
+- Override rule:
+  - If LLM conflicts and abs(rubric_delta) >= 18 with rubric basis, use deterministic winner.
+- Enforce final lines in report:
+  - OUTPERFORMER: <ticker>
+  - CONFIDENCE: <HIGH|MEDIUM|LOW>
+
+Task T12: Delivery and persistence
+Goal:
+- Return API/CLI/UI payload and optionally save markdown reports.
+Inputs:
+- Final single/comparison payload; save flag.
+Outputs:
+- Returned JSON payload; optional markdown file in reports/.
+Decision points:
+- save true/false.
+Handling:
+- Single report file pattern: <TICKER>_<timestamp>.md
+- Comparison file pattern: COMPARE_<A>_VS_<B>_<timestamp>.md
+
+6) Failure and Fallback Matrix
+- Gemini unavailable at startup: stop with explicit preflight message.
+- Tavily unavailable: continue without context; include note.
+- Any LLM generation failure in Agent 1/2/3: deterministic local fallback report.
+- Agent 4 synthesis failure: deterministic final recommendation and report.
+- Invalid/missing comparison verdict lines: force deterministic winner and append enforced lines.
+- Missing critical stock_data in Agent 4: fail fast to prevent unsafe output.
+
+7) Non-Functional Requirements
+- Deterministic safety behavior must always be available.
+- Structured output contracts must remain stable across modes.
+- Sensitive keys must never be emitted in raw errors (sanitize API key in errors).
+- Mode behavior:
+  - quick = lower latency, single-pass synthesis
+  - deep = multi-pass critique and richer context
+
+8) Acceptance Checklist
+- The system handles both single and comparison queries.
+- Every final report includes structured decision fields.
+- Governance notes appear when rule overrides are applied.
+- Comparison always returns exactly one winner.
+- Pipeline continues safely when optional services (Tavily/LLM judge) are unavailable.
+- Save mode writes markdown reports with expected naming patterns.

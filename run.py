@@ -75,8 +75,12 @@ def check_env() -> bool:
         return False
 
     ok(message)
-    if not os.environ.get("TAVILY_API_KEY"):
-        print(f"{YELLOW}⚠  TAVILY_API_KEY not set. Tavily context will be skipped.{RESET}")
+    
+    tavily_key = (os.environ.get("TAVILY_API_KEY") or "").strip()
+    if not tavily_key:
+        error("TAVILY_API_KEY is required but not set.")
+        return False
+    ok("TAVILY_API_KEY is configured.")
     return True
 
 

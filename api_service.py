@@ -99,8 +99,12 @@ def health() -> JSONResponse:
     gemini_ok, gemini_message = check_gemini()
     tavily_configured = bool((os.environ.get("TAVILY_API_KEY") or "").strip())
 
-    ok = gemini_ok
+    ok = gemini_ok and tavily_configured
     code = 200 if ok else 503
+    
+    if not tavily_configured:
+        gemini_message += " (TAVILY_API_KEY is required and not set)"
+    
     payload = {
         "ok": ok,
         "message": gemini_message,

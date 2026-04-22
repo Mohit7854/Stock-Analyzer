@@ -10,6 +10,7 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from tavily import TavilyClient
@@ -18,12 +19,23 @@ from llm_client import _llm
 
 TAG = "Agent 2"
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "").strip()
-tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
+if not TAVILY_API_KEY:
+    raise ValueError("TAVILY_API_KEY environment variable is required.")
+tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+
+def _retry_tavily_search(query: str, max_retries: int = 3, base_delay: float = 1.0) -> dict:
+    """Execute Tavily search with exponential backoff retry logic."""
+    for attempt in range(max_retries):
+        try:
+            return tavily_client.search(query=query, search_depth="advanced", max_results=3, include_answer=True)
+        except Exception as exc:
+            if attempt == max_retries - 1:
+                raise RuntimeError(f"Tavily search failed after {max_retries} attempts: {str(exc)}") from exc
+            delay = base_delay * (2 ** attempt)
+            time.sleep(delay)
 
 
 def fetch_market_commentary(ticker: str, company: str, mode: str = "quick") -> dict:
-    if not tavily_client:
-        return {"note": "TAVILY_API_KEY not set; skipped Tavily context."}
 
     mode = (mode or "quick").strip().lower()
     deep = mode == "deep"
@@ -45,7 +57,7 @@ def fetch_market_commentary(ticker: str, company: str, mode: str = "quick") -> d
 
     def _fetch_one(q: str) -> tuple[str, dict]:
         try:
-            r = tavily_client.search(query=q, search_depth="advanced", max_results=max_results, include_answer=True)
+            r = _retry_tavily_search(q)
             return q, {
                 "answer": r.get("answer", ""),
                 "results": [
@@ -54,7 +66,7 @@ def fetch_market_commentary(ticker: str, company: str, mode: str = "quick") -> d
                 ],
             }
         except Exception as exc:
-            return q, {"error": str(exc)}
+            raise RuntimeError(f"Failed to fetch Tavily context for '{q}': {str(exc)}") from exc
 
     with ThreadPoolExecutor(max_workers=min(4, len(queries))) as pool:
         futures = [pool.submit(_fetch_one, q) for q in queries]
@@ -64,7 +76,7 @@ def fetch_market_commentary(ticker: str, company: str, mode: str = "quick") -> d
 
     if deep:
         return out
-    return next(iter(out.values()), {"note": "No technical context returned."})
+    return next(iter(out.values()), {})
 
 
 def analyze_technicals(ticker: str, company: str, stock_data: dict, tavily_context: dict, mode: str = "quick") -> str:

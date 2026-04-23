@@ -1,5 +1,5 @@
 """
-Agent 4 - Investment Advisor (Synthesis Agent)
+Agent 5 - Investment Advisor (Synthesis Agent)
 Combines previous agent outputs into the final decision report.
 """
 
@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from llm_client import _llm
-from agent4_utils import (
+from agent5_utils import (
     StructuredDecision,
     apply_rule_overrides,
     compute_rule_decision,
@@ -28,7 +28,7 @@ from agent4_utils import (
     validate_stock_data,
 )
 
-TAG = "Agent 4"
+TAG = "Agent 5"
 
 logger = logging.getLogger(TAG)
 if not logger.handlers:
@@ -739,6 +739,7 @@ def _build_pass1_prompt(
     market_report: str,
     technical_report: str,
     fundamental_report: str,
+    macro_report: str,
     signals: dict[str, Any],
     stock_warnings: list[str],
     signal_warnings: list[str],
@@ -826,6 +827,9 @@ Technical report context:
 
 Fundamental report context:
 {summarize_for_context(fundamental_report, max_chars=context_window)}
+
+Macro & Risk report context:
+{summarize_for_context(macro_report, max_chars=context_window)}
 
 Write a robust report with these sections:
 # Equity Research - {ticker} ({company})
@@ -961,13 +965,14 @@ def _ensure_final_verdict_line(report_text: str, decision: StructuredDecision) -
 
 def synthesize_report(ticker: str, company: str, stock_data: dict,
                       market_report: str, technical_report: str,
-                      fundamental_report: str, signals: dict,
+                      fundamental_report: str, macro_report: str, signals: dict,
                       mode: str = "quick") -> dict[str, Any]:
     parsed = parse_signals_impl(
         {
             "market_report": market_report,
             "technical_report": technical_report,
             "fundamental_report": fundamental_report,
+            "macro_report": macro_report,
         }
     )
     signal_map = {
@@ -975,6 +980,7 @@ def synthesize_report(ticker: str, company: str, stock_data: dict,
         "signal": parsed.technical_signal,
         "confidence": parsed.technical_confidence,
         "fund_view": parsed.fundamental_view,
+        "macro_rating": parsed.macro_rating,
         "horizon": parsed.horizon,
     }
 
@@ -1005,6 +1011,7 @@ def synthesize_report(ticker: str, company: str, stock_data: dict,
             market_report=market_report,
             technical_report=technical_report,
             fundamental_report=fundamental_report,
+            macro_report=macro_report,
             signals=signal_map,
             stock_warnings=stock_warnings,
             signal_warnings=parsed.warnings,
@@ -1304,26 +1311,35 @@ This is not financial advice.
         }
 
 
-def run(agent3_output: dict, mode: str = "quick") -> dict:
-    ticker = agent3_output["ticker"]
-    company = agent3_output["company"]
-    stock_data = agent3_output.get("stock_data", {})
+def run(agent5_output: dict, mode: str = "quick") -> dict:
+    ticker = agent5_output["ticker"]
+    company = agent5_output["company"]
+    stock_data = agent5_output.get("stock_data", {})
 
-    market_report = agent3_output.get("market_report", "")
-    technical_report = agent3_output.get("technical_report", "")
-    fundamental_report = agent3_output.get("fundamental_report", "")
+    market_report = agent5_output.get("market_report", "")
+    technical_report = agent5_output.get("technical_report", "")
+    fundamental_report = agent5_output.get("fundamental_report", "")
+    macro_report = agent5_output.get("macro_report", "")
 
-    parsed = parse_signals_impl(agent3_output)
+    parsed = parse_signals_impl(
+        {
+            "market_report": market_report,
+            "technical_report": technical_report,
+            "fundamental_report": fundamental_report,
+            "macro_report": macro_report,
+        }
+    )
     signals = {
         "trend": parsed.trend,
         "signal": parsed.technical_signal,
         "confidence": parsed.technical_confidence,
         "fund_view": parsed.fundamental_view,
+        "macro_rating": parsed.macro_rating,
         "horizon": parsed.horizon,
         "warnings": parsed.warnings,
     }
-    print(f"\n[Agent 4] Building final investment report for {ticker}...")
 
+    print(f"\n[Agent 5] Building final investment report for {ticker}...")
     payload = synthesize_report(
         ticker=ticker,
         company=company,
@@ -1331,6 +1347,7 @@ def run(agent3_output: dict, mode: str = "quick") -> dict:
         market_report=market_report,
         technical_report=technical_report,
         fundamental_report=fundamental_report,
+        macro_report=macro_report,
         signals=signals,
         mode=mode,
     )
@@ -1340,13 +1357,13 @@ def run(agent3_output: dict, mode: str = "quick") -> dict:
     structured_output = parsed_payload.get("structured_output", {})
 
     return {
-        **agent3_output,
+        **agent5_output,
         "mode": parsed_payload.get("mode", mode),
         "signals": signals,
-        "agent4_critique": parsed_payload.get("critique", ""),
-        "agent4_rubric_critique": parsed_payload.get("rubric_critique", ""),
+        "agent5_critique": parsed_payload.get("critique", ""),
+        "agent5_rubric_critique": parsed_payload.get("rubric_critique", ""),
         "rubric": parsed_payload.get("rubric", {}),
-        "agent4_warnings": {
+        "agent5_warnings": {
             "signal_warnings": parsed_payload.get("signal_warnings", []),
             "stock_warnings": parsed_payload.get("stock_warnings", []),
             "rule_messages": parsed_payload.get("rule_messages", []),

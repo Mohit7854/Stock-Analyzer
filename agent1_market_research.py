@@ -9,32 +9,13 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 import json
-import os
 import re
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-from tavily import TavilyClient
 
 from llm_client import _llm
 from market_data import get_stock_snapshot, resolve_ticker as yahoo_resolve_ticker
+from tavily_service import fetch_tavily_context
 
 TAG = "Agent 1"
-TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "").strip()
-if not TAVILY_API_KEY:
-    raise ValueError("TAVILY_API_KEY environment variable is required.")
-tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
-
-def _retry_tavily_search(query: str, max_retries: int = 3, base_delay: float = 1.0) -> dict:
-    """Execute Tavily search with exponential backoff retry logic."""
-    for attempt in range(max_retries):
-        try:
-            return tavily_client.search(query=query, search_depth="advanced", max_results=4, include_answer=True)
-        except Exception as exc:
-            if attempt == max_retries - 1:
-                raise RuntimeError(f"Tavily search failed after {max_retries} attempts: {str(exc)}") from exc
-            delay = base_delay * (2 ** attempt)
-            time.sleep(delay)
 
 _INTENT_STOPWORDS = {
     "i", "want", "need", "show", "me", "the", "a", "an", "for", "to", "of", "and",
@@ -95,7 +76,7 @@ def _ticker_with_exchange_hint(ticker_hint: str, exchange_hint: str) -> str:
 
 def inspect_user_input_with_llm(user_input: str) -> dict:
     """
-    Always send raw user text to Gemini first so it can infer ticker/company intent.
+    Always send raw user text to LLM first so it can infer ticker/company intent.
     """
     prompt = f"""Interpret the user's stock query and infer ticker intent.
 
@@ -192,7 +173,7 @@ def resolve_ticker(user_input: str) -> tuple[dict, dict, str]:
     raise RuntimeError("Unable to resolve ticker from user input.")
 
 
-def fetch_news_context(ticker: str, company: str, mode: str = "quick") -> dict:
+def fetch_news_context(ticker: str, company: str, mode: str = "quick") -> tuple[dict, dict]:
     mode = (mode or "quick").strip().lower()
     deep = mode == "deep"
 
@@ -214,28 +195,16 @@ def fetch_news_context(ticker: str, company: str, mode: str = "quick") -> dict:
         max_results = 2
         snippet_len = 320
 
-    out: dict[str, dict] = {}
-
-    def _fetch_one(q: str) -> tuple[str, dict]:
-        try:
-            r = _retry_tavily_search(q)
-            return q, {
-                "answer": r.get("answer", ""),
-                "results": [
-                    {"title": x.get("title", ""), "content": (x.get("content", "")[:snippet_len])}
-                    for x in r.get("results", [])
-                ],
-            }
-        except Exception as exc:
-            raise RuntimeError(f"Failed to fetch Tavily context for '{q}': {str(exc)}") from exc
-
-    with ThreadPoolExecutor(max_workers=min(4, len(queries))) as pool:
-        futures = [pool.submit(_fetch_one, q) for q in queries]
-        for fut in as_completed(futures):
-            q, payload = fut.result()
-            out[q] = payload
-
-    return out
+    out, meta = fetch_tavily_context(
+        agent_id=1,
+        mode=mode,
+        queries=queries,
+        max_results=max_results,
+        snippet_len=snippet_len,
+        quick_cap_default=1,
+        deep_cap_default=2,
+    )
+    return out, meta
 
 
 def _summarize_news_context(news_data: dict, max_points: int = 5) -> list[str]:
@@ -435,8 +404,18 @@ def run(user_input: str, mode: str = "quick") -> dict:
         )
     print(f"[Agent 1] Yahoo resolver query used -> '{used_query}'")
     print(f"[Agent 1] Resolved -> {ticker} ({company}) [{resolved.get('confidence', 'MEDIUM')}]")
-    print(f"[Agent 1] Fetching Tavily context...")
-    news_data = fetch_news_context(ticker, company, mode=mode)
+    print(f"[Agent 1] Loading Tavily context (policy-controlled)...")
+    news_data, tavily_meta = fetch_news_context(ticker, company, mode=mode)
+    if tavily_meta.get("enabled"):
+        print(
+            f"[Agent 1] Tavily queries used: {int(tavily_meta.get('successful_queries', 0) or 0)}"
+            f"/{int(tavily_meta.get('attempted_queries', 0) or 0)}"
+        )
+    else:
+        print("[Agent 1] Tavily disabled by policy for this agent.")
+    if tavily_meta.get("warnings"):
+        for warning in tavily_meta.get("warnings", []):
+            print(f"[Agent 1] Tavily note: {warning}")
 
     print(f"[Agent 1] Writing market report...")
     report = synthesize_market_summary(ticker, company, stock_data, news_data, mode=mode)
@@ -448,12 +427,16 @@ def run(user_input: str, mode: str = "quick") -> dict:
         "confidence": resolved.get("confidence", ""),
         "reasoning": resolved.get("reasoning", ""),
         "llm_ticker_interpretation": hint,
-        "gemini_ticker_interpretation": hint,
+        "groq_ticker_interpretation": hint,
         "stock_data": stock_data,
         "market_context": news_data,
+        "market_context_meta": tavily_meta,
         "market_report": report,
         "research_depth": mode,
-        "context_queries_used": len(news_data) if isinstance(news_data, dict) else 0,
+        "context_queries_used": int(tavily_meta.get("successful_queries", 0) or 0),
+        "context_queries_attempted": int(tavily_meta.get("attempted_queries", 0) or 0),
+        "context_warnings": tavily_meta.get("warnings", []),
+        "tavily_degraded": bool(tavily_meta.get("degraded", False)),
     }
 
 

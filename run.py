@@ -1,8 +1,9 @@
 """
 run.py - Master Orchestrator
 Pipeline:
-  Agent 1 (Yahoo + Tavily) -> Agent 2 (Yahoo + Tavily) ->
-        Agent 3 (Yahoo + Tavily) -> Agent 4 (Gemini synthesis)
+    Agent 1 (Market) -> Agent 2 (Technical) ->
+    Agent 3 (Fundamental) -> Agent 4 (Macro & Risk) ->
+    Agent 5 (Investment Advisor)
 
 Also supports two-stock comparison:
     - Two positional queries: python run.py "asian paints" "mrf"
@@ -29,10 +30,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 import agent1_market_research
 import agent2_technical_analyst
 import agent3_fundamental_analyst
-import agent4_investment_advisor
+import agent4_macro_risk_specialist
+import agent5_investment_advisor
 import llm_client
 from llm_client import _llm
-from llm_client import check_gemini
+from llm_client import check_groq
+from tavily_service import get_tavily_policy
 
 
 # ---------------------------------------------------------------------------
@@ -69,32 +72,54 @@ def error(msg: str) -> None:
 # Validate environment
 # ---------------------------------------------------------------------------
 def check_env() -> bool:
-    ok_gemini, message = check_gemini()
-    if not ok_gemini:
+    ok_groq, message = check_groq()
+    if not ok_groq:
         error(message)
         return False
 
     ok(message)
-    
+    policy = get_tavily_policy()
+    enabled = policy.get("enabled_agent_names") or []
+    info(
+        "Tavily policy"
+        + f" | enabled_agents={','.join(enabled) if enabled else 'none'}"
+        + f" | fail_open={policy.get('fail_open')}"
+        + f" | max_retries={policy.get('max_retries')}"
+        + f" | min_delay_seconds={policy.get('min_delay_seconds')}"
+        + f" | search_depth={policy.get('search_depth')}"
+    )
+
     tavily_key = (os.environ.get("TAVILY_API_KEY") or "").strip()
     if not tavily_key:
-        error("TAVILY_API_KEY is required but not set.")
-        return False
-    ok("TAVILY_API_KEY is configured.")
+        if policy.get("required"):
+            error("TAVILY_API_KEY is required when TAVILY_FAIL_OPEN=false.")
+            return False
+        info("TAVILY_API_KEY is not set; Tavily context will be skipped where optional.")
+    else:
+        ok("TAVILY_API_KEY is configured.")
     return True
 
 
 # ---------------------------------------------------------------------------
 # Save report to file
 # ---------------------------------------------------------------------------
-def save_report(output: dict) -> Path:
+def save_report(output: dict) -> Path | None:
     reports_dir = Path(__file__).parent / "reports"
-    reports_dir.mkdir(exist_ok=True)
+    try:
+        reports_dir.mkdir(exist_ok=True)
+    except Exception:
+        # Fallback to /tmp for serverless environments like Vercel
+        reports_dir = Path("/tmp/reports")
+        try:
+            reports_dir.mkdir(exist_ok=True)
+        except Exception:
+            return None
 
     ticker    = output.get("ticker", "UNKNOWN")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename  = reports_dir / f"{ticker}_{timestamp}.md"
 
+    # ... existing lines logic ...
     lines = [
         f"# Stock Analysis Report — {ticker} ({output.get('company', '')})",
         f"_Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_",
@@ -116,18 +141,33 @@ def save_report(output: dict) -> Path:
         "",
         "---",
         "",
-        "## Agent 4 — Final Investment Report",
+        "## Agent 4 — Macro & Risk Analysis",
+        output.get("macro_report", ""),
+        "",
+        "---",
+        "",
+        "## Agent 5 — Final Investment Report",
         output.get("final_report", ""),
         "",
     ]
 
-    filename.write_text("\n".join(lines), encoding="utf-8")
-    return filename
+    try:
+        filename.write_text("\n".join(lines), encoding="utf-8")
+        return filename
+    except Exception:
+        return None
 
 
-def save_comparison_report(output_a: dict, output_b: dict, comparison_report: str) -> Path:
+def save_comparison_report(output_a: dict, output_b: dict, comparison_report: str) -> Path | None:
     reports_dir = Path(__file__).parent / "reports"
-    reports_dir.mkdir(exist_ok=True)
+    try:
+        reports_dir.mkdir(exist_ok=True)
+    except Exception:
+        reports_dir = Path("/tmp/reports")
+        try:
+            reports_dir.mkdir(exist_ok=True)
+        except Exception:
+            return None
 
     t1 = output_a.get("ticker", "A")
     t2 = output_b.get("ticker", "B")
@@ -155,8 +195,11 @@ def save_comparison_report(output_a: dict, output_b: dict, comparison_report: st
         "",
     ]
 
-    filename.write_text("\n".join(lines), encoding="utf-8")
-    return filename
+    try:
+        filename.write_text("\n".join(lines), encoding="utf-8")
+        return filename
+    except Exception:
+        return None
 
 
 def _extract_json_object(raw: str) -> dict:
@@ -544,66 +587,123 @@ def run_pipeline(user_input: str,
     if mode not in {"quick", "deep"}:
         mode = "quick"
 
+    pipeline_warnings: list[str] = []
+
     # ── Agent 1 ────────────────────────────────────────────────────────────
-    step(1, "Market Data Research  [Yahoo Finance + Tavily + Gemini]")
+    step(1, "Market Data Research  [Yahoo Finance + Tavily(optional) + Groq]")
     try:
         a1 = agent1_market_research.run(user_input, mode=mode)
         ok(f"Ticker resolved → {a1['ticker']} ({a1['company']})  "
            f"[{a1['confidence']} confidence]")
         info(a1.get("reasoning", ""))
         if mode == "deep":
-            info(f"Deep context queries used: {a1.get('context_queries_used', 0)}")
+            info(
+                "Deep context queries"
+                + f" attempted={a1.get('context_queries_attempted', 0)}"
+                + f" used={a1.get('context_queries_used', 0)}"
+            )
+        for warning in a1.get("context_warnings", []) or []:
+            msg = f"Agent 1: {warning}"
+            pipeline_warnings.append(msg)
+            info(msg)
     except Exception as e:
         error(f"Agent 1 failed: {e}")
         raise
 
     # ── Agent 2 ────────────────────────────────────────────────────────────
-    step(2, "Technical Analyst  [Yahoo Finance + Tavily + Gemini]")
+    step(2, "Technical Analyst  [Yahoo Finance + Groq | Tavily optional]")
     try:
         a2 = agent2_technical_analyst.run(a1, mode=mode)
         ok("Technical analysis complete")
         if mode == "deep":
-            info(f"Technical context blocks used: {a2.get('technical_context_queries_used', 0)}")
+            info(
+                "Technical context queries"
+                + f" attempted={a2.get('technical_context_queries_attempted', 0)}"
+                + f" used={a2.get('technical_context_queries_used', 0)}"
+            )
+        for warning in a2.get("technical_context_warnings", []) or []:
+            msg = f"Agent 2: {warning}"
+            pipeline_warnings.append(msg)
+            info(msg)
     except Exception as e:
         error(f"Agent 2 failed: {e}")
         raise
 
     # ── Agent 3 ────────────────────────────────────────────────────────────
-    step(3, "Fundamental Analyst  [Yahoo Finance + Tavily + Gemini]")
+    step(3, "Fundamental Analyst  [Yahoo Finance + Tavily(optional) + Groq]")
     try:
         a3 = agent3_fundamental_analyst.run(a2, mode=mode)
         ok("Fundamental analysis complete")
         if mode == "deep":
-            info(f"Fundamental context blocks used: {a3.get('fundamental_context_queries_used', 0)}")
+            info(
+                "Fundamental context queries"
+                + f" attempted={a3.get('fundamental_context_queries_attempted', 0)}"
+                + f" used={a3.get('fundamental_context_queries_used', 0)}"
+            )
+        for warning in a3.get("fundamental_context_warnings", []) or []:
+            msg = f"Agent 3: {warning}"
+            pipeline_warnings.append(msg)
+            info(msg)
     except Exception as e:
         error(f"Agent 3 failed: {e}")
         raise
 
     # ── Agent 4 ────────────────────────────────────────────────────────────
-    step(4, f"Investment Advisor  [Gemini model: {llm_client.MODEL}] [mode: {mode}]")
+    step(4, "Macro & Risk Specialist  [Tavily + Groq]")
     try:
-        a4 = agent4_investment_advisor.run(a3, mode=mode)
-        signals = a4.get("signals", {})
+        a4_macro = agent4_macro_risk_specialist.run(a3, mode=mode)
+        ok("Macro & Risk analysis complete")
+        if mode == "deep":
+            info(
+                "Macro context queries used"
+                + f" = {a4_macro.get('macro_context_queries_used', 0)}"
+            )
+        for warning in a4_macro.get("macro_context_warnings", []) or []:
+            msg = f"Agent 4: {warning}"
+            pipeline_warnings.append(msg)
+            info(msg)
+    except Exception as e:
+        error(f"Agent 4 failed: {e}")
+        raise
+
+    # ── Agent 5 ────────────────────────────────────────────────────────────
+    step(5, f"Investment Advisor  [Groq model: {llm_client.MODEL}] [mode: {mode}]")
+    try:
+        try:
+            pre_delay = float(os.environ.get("GROQ_PRE_AGENT5_DELAY_SECONDS", "0") or 0)
+        except Exception:
+            pre_delay = 0.0
+        if pre_delay > 0:
+            info(f"Waiting {pre_delay:.1f}s before Agent 5 to reduce rate-limit risk...")
+            time.sleep(pre_delay)
+        a5 = agent5_investment_advisor.run(a4_macro, mode=mode)
+        signals = a5.get("signals", {})
         ok(f"Final report ready  |  Signals → trend={signals.get('trend')}  "
            f"tech={signals.get('signal')}  fund={signals.get('fund_view')}")
     except Exception as e:
-        error(f"Agent 4 failed: {e}")
+        error(f"Agent 5 failed: {e}")
         raise
 
     elapsed = time.time() - start
 
     # ── Print final report ─────────────────────────────────────────────────
-    banner(f"FINAL REPORT — {a4['ticker']} ({a4['company']})", GREEN)
-    print(a4["final_report"])
+    banner(f"FINAL REPORT — {a5['ticker']} ({a5['company']})", GREEN)
+    print(a5["final_report"])
 
     # ── Save ───────────────────────────────────────────────────────────────
     if save:
-        path = save_report(a4)
+        path = save_report(a5)
         ok(f"Report saved → {path}")
 
     banner(f"Done in {elapsed:.1f}s", DIM)
 
-    return {"output": a4, "elapsed": elapsed, "mode": mode}
+    return {
+        "output": a5,
+        "elapsed": elapsed,
+        "mode": mode,
+        "degraded": bool(pipeline_warnings),
+        "warnings": pipeline_warnings,
+    }
 
 
 def run_comparison_pipeline(query_a: str, query_b: str, save: bool = False, mode: str = "quick") -> dict:
@@ -619,6 +719,12 @@ def run_comparison_pipeline(query_a: str, query_b: str, save: bool = False, mode
 
     output_a = result_a["output"]
     output_b = result_b["output"]
+
+    combined_warnings: list[str] = []
+    for warning in result_a.get("warnings", []) or []:
+        combined_warnings.append(f"{output_a.get('ticker', 'A')}: {warning}")
+    for warning in result_b.get("warnings", []) or []:
+        combined_warnings.append(f"{output_b.get('ticker', 'B')}: {warning}")
 
     banner(f"COMPARISON REPORT — {output_a.get('ticker')} vs {output_b.get('ticker')}", YELLOW)
     comparison_report = build_comparison_report(query_a, query_b, output_a, output_b, mode=mode)
@@ -637,6 +743,8 @@ def run_comparison_pipeline(query_a: str, query_b: str, save: bool = False, mode
     return {
         "stock_a": output_a,
         "stock_b": output_b,
+        "stock_a_degraded": bool(result_a.get("degraded", False)),
+        "stock_b_degraded": bool(result_b.get("degraded", False)),
         "comparison_report": comparison_report,
         "winner": winner,
         "confidence": confidence,
@@ -645,6 +753,8 @@ def run_comparison_pipeline(query_a: str, query_b: str, save: bool = False, mode
         "rubric_delta": comparison_meta.get("rubric_delta"),
         "elapsed_total": result_a.get("elapsed", 0.0) + result_b.get("elapsed", 0.0),
         "mode": mode,
+        "degraded": bool(result_a.get("degraded", False) or result_b.get("degraded", False)),
+        "warnings": combined_warnings,
     }
 
 

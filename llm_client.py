@@ -1,49 +1,42 @@
 """
-llm_client.py - Shared Gemini API client for all agents.
+llm_client.py - Shared Groq API client for all agents (OpenAI-compatible).
 """
 
 from __future__ import annotations
 
 import os
 import time
+from threading import Lock
 
 import requests
 
-GEMINI_BASE_URL = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-TIMEOUT_SECONDS = int(os.environ.get("GEMINI_TIMEOUT", "180"))
-MAX_RETRIES = int(os.environ.get("GEMINI_MAX_RETRIES", "4"))
-RETRY_BASE_SECONDS = float(os.environ.get("GEMINI_RETRY_BASE_SECONDS", "1.5"))
-_ACTIVE_API_VERSION = (os.environ.get("GEMINI_API_VERSION", "v1beta") or "v1beta").strip()
+GROQ_BASE_URL = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+TIMEOUT_SECONDS = int(os.environ.get("GROQ_TIMEOUT", "60"))
+MAX_RETRIES = int(os.environ.get("GROQ_MAX_RETRIES", "3"))
+RETRY_BASE_SECONDS = float(os.environ.get("GROQ_RETRY_BASE_SECONDS", "1.0"))
+MIN_CALL_INTERVAL_SECONDS = float(os.environ.get("GROQ_MIN_CALL_INTERVAL_SECONDS", "1.0"))
+MAX_RETRY_DELAY_SECONDS = float(os.environ.get("GROQ_MAX_RETRY_DELAY_SECONDS", "60"))
+RATE_LIMIT_MIN_WAIT_SECONDS = float(os.environ.get("GROQ_RATE_LIMIT_MIN_WAIT_SECONDS", "10"))
+FAIL_FAST_ON_429 = str(os.environ.get("GROQ_FAIL_FAST_ON_429", "true")).strip().lower() in {"1", "true", "yes", "on"}
+RATE_LIMIT_COOLDOWN_SECONDS = float(os.environ.get("GROQ_RATE_LIMIT_COOLDOWN_SECONDS", "60"))
+
 _FALLBACK_MODELS_RAW = os.environ.get(
-    "GEMINI_MODEL_FALLBACKS",
-    "gemini-2.0-flash,gemini-1.5-flash-latest,gemini-1.5-flash,gemini-1.5-pro",
+    "GROQ_MODEL_FALLBACKS",
+    "llama-3.3-70b-versatile,llama-3.1-70b-versatile,mixtral-8x7b-32768",
 )
+
+_LLM_RATE_LOCK = Lock()
+_LAST_LLM_CALL_TS = 0.0
+_RATE_LIMIT_BLOCK_UNTIL = 0.0
 
 
 def _sanitize_error(text: str) -> str:
     out = text or ""
-    if GEMINI_API_KEY:
-        out = out.replace(GEMINI_API_KEY, "***")
+    if GROQ_API_KEY:
+        out = out.replace(GROQ_API_KEY, "***")
     return out
-
-
-def _api_versions() -> list[str]:
-    preferred = (os.environ.get("GEMINI_API_VERSION", _ACTIVE_API_VERSION) or "v1beta").strip()
-    out: list[str] = []
-    for version in (preferred, "v1beta", "v1"):
-        if version and version not in out:
-            out.append(version)
-    return out
-
-
-def _model_path(model_name: str) -> str:
-    return model_name if model_name.startswith("models/") else f"models/{model_name}"
-
-
-def _strip_model_prefix(model_name: str) -> str:
-    return model_name.split("/", 1)[1] if model_name.startswith("models/") else model_name
 
 
 def _candidate_models() -> list[str]:
@@ -53,7 +46,7 @@ def _candidate_models() -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for name in raw:
-        n = _strip_model_prefix((name or "").strip())
+        n = (name or "").strip()
         if not n:
             continue
         if n in seen:
@@ -63,103 +56,91 @@ def _candidate_models() -> list[str]:
     return out
 
 
-def _model_exists(model_name: str, api_version: str) -> tuple[bool, str]:
-    url = f"{GEMINI_BASE_URL}/{api_version}/{_model_path(model_name)}"
-    try:
-        resp = requests.get(url, params={"key": GEMINI_API_KEY}, timeout=15)
-    except Exception as exc:
-        return False, _sanitize_error(str(exc))
+def _respect_min_call_interval() -> None:
+    global _LAST_LLM_CALL_TS
 
-    if resp.status_code == 200:
-        return True, ""
-    if resp.status_code in (400, 404):
-        return False, ""
+    wait_for = 0.0
+    with _LLM_RATE_LOCK:
+        now = time.time()
+        elapsed = now - _LAST_LLM_CALL_TS
+        if MIN_CALL_INTERVAL_SECONDS > 0 and elapsed < MIN_CALL_INTERVAL_SECONDS:
+            wait_for = MIN_CALL_INTERVAL_SECONDS - elapsed
 
-    snippet = _sanitize_error((resp.text or "")[:260])
-    return False, f"HTTP {resp.status_code}: {snippet}"
+    if wait_for > 0:
+        time.sleep(wait_for)
 
 
-def _list_models(api_version: str) -> tuple[list[str], str]:
-    url = f"{GEMINI_BASE_URL}/{api_version}/models"
-    try:
-        resp = requests.get(url, params={"key": GEMINI_API_KEY}, timeout=15)
-    except Exception as exc:
-        return [], _sanitize_error(str(exc))
+def _mark_call_timestamp() -> None:
+    global _LAST_LLM_CALL_TS
+    with _LLM_RATE_LOCK:
+        _LAST_LLM_CALL_TS = time.time()
 
-    if resp.status_code != 200:
-        snippet = _sanitize_error((resp.text or "")[:260])
-        return [], f"HTTP {resp.status_code}: {snippet}"
+
+def _retry_after_seconds(resp: requests.Response) -> float:
+    retry_after = (resp.headers or {}).get("Retry-After")
+    if not retry_after:
+        return 0.0
 
     try:
-        payload = resp.json()
+        seconds = float(str(retry_after).strip())
     except Exception:
-        return [], "Failed to parse Gemini models list response."
-
-    names = [m.get("name", "") for m in payload.get("models", []) if isinstance(m, dict)]
-    return names, ""
-
-
-def _pick_best_model(available: list[str]) -> str:
-    if not available:
-        return ""
-
-    available_clean = {_strip_model_prefix(x): x for x in available if isinstance(x, str) and x}
-
-    for candidate in _candidate_models():
-        if candidate in available_clean:
-            return candidate
-
-    for name in available_clean:
-        if name.startswith("gemini-") and "flash" in name:
-            return name
-
-    for name in available_clean:
-        if name.startswith("gemini-"):
-            return name
-
-    return ""
+        return 0.0
+    if seconds <= 0:
+        return 0.0
+    return min(seconds, max(1.0, MAX_RETRY_DELAY_SECONDS))
 
 
-def check_gemini() -> tuple[bool, str]:
+def _set_rate_limit_cooldown(wait_s: float = 0.0) -> None:
+    global _RATE_LIMIT_BLOCK_UNTIL
+
+    hold = max(wait_s, RATE_LIMIT_COOLDOWN_SECONDS)
+    if hold <= 0:
+        return
+    _RATE_LIMIT_BLOCK_UNTIL = max(_RATE_LIMIT_BLOCK_UNTIL, time.time() + hold)
+
+
+def _clear_rate_limit_cooldown() -> None:
+    global _RATE_LIMIT_BLOCK_UNTIL
+    _RATE_LIMIT_BLOCK_UNTIL = 0.0
+
+
+def _is_rate_limited_now() -> bool:
+    return time.time() < _RATE_LIMIT_BLOCK_UNTIL
+
+
+def check_groq() -> tuple[bool, str]:
+    """Check connection to Groq API."""
     global MODEL
-    global _ACTIVE_API_VERSION
 
-    if not GEMINI_API_KEY:
-        return False, "GEMINI_API_KEY is not set. Add it to your environment or .env file."
+    if not GROQ_API_KEY:
+        return False, "GROQ_API_KEY is not set. Add it to your environment or .env file."
 
-    last_problem = ""
-    for candidate in _candidate_models():
-        for api_version in _api_versions():
-            ok, problem = _model_exists(candidate, api_version)
-            if ok:
-                MODEL = candidate
-                _ACTIVE_API_VERSION = api_version
-                return True, f"Gemini API is ready with model '{MODEL}' ({_ACTIVE_API_VERSION})."
-            if problem:
-                last_problem = problem
+    url = f"{GROQ_BASE_URL}/models"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
-    discovered: list[str] = []
-    for api_version in _api_versions():
-        names, problem = _list_models(api_version)
-        if names:
-            discovered = names
-            best = _pick_best_model(names)
-            if best:
-                MODEL = best
-                _ACTIVE_API_VERSION = api_version
-                return True, f"Gemini API is ready with auto-selected model '{MODEL}' ({_ACTIVE_API_VERSION})."
-        if problem:
-            last_problem = problem
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            models = [m.get("id") for m in data.get("data", [])]
+            if MODEL in models:
+                return True, f"Groq API is ready with model '{MODEL}'."
+            elif models:
+                # Fallback to first available if requested model not found
+                return True, f"Groq API is ready. Available models: {', '.join(models[:3])}..."
+            return True, "Groq API is reachable."
+        else:
+            snippet = _sanitize_error((resp.text or "")[:260])
+            return False, f"Groq API returned HTTP {resp.status_code}: {snippet}"
+    except Exception as exc:
+        return False, f"Failed to connect to Groq API: {_sanitize_error(str(exc))}"
 
-    msg = "Could not connect to Gemini API or validate a usable model."
-    if discovered:
-        sample = ", ".join(_strip_model_prefix(x) for x in discovered[:5])
-        msg += f" Available models example: {sample}."
-    else:
-        msg += " Set GEMINI_MODEL to an available model like gemini-2.0-flash."
-    if last_problem:
-        msg += f" Details: {last_problem}"
-    return False, msg
+# Alias for backward compatibility if needed, though we will update references
+def check_gemini() -> tuple[bool, str]:
+    return check_groq()
 
 
 def _llm(
@@ -169,102 +150,115 @@ def _llm(
     system: str = "You are a helpful financial analyst assistant.",
 ) -> str:
     global MODEL
-    global _ACTIVE_API_VERSION
 
-    if not GEMINI_API_KEY:
-        raise RuntimeError(f"[{agent_tag}] GEMINI_API_KEY is missing.")
+    if not GROQ_API_KEY:
+        raise RuntimeError(f"[{agent_tag}] GROQ_API_KEY is missing.")
 
-    combined_prompt = f"System instructions:\n{system}\n\nUser request:\n{prompt}"
+    if _is_rate_limited_now():
+        raise RuntimeError(f"[{agent_tag}] Groq is temporarily rate-limited; retry after cooldown.")
 
     payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": combined_prompt},
-                ]
-            }
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
         ],
-        "generationConfig": {
-            "maxOutputTokens": int(max_tokens),
-            "temperature": 0.2,
-        },
+        "max_tokens": int(max_tokens),
+        "temperature": 0.2,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
     }
 
     soft_errors: list[str] = []
+    
+    # Try with candidate models if primary fails
     for candidate in _candidate_models():
-        model_path = _model_path(candidate)
-        for api_version in _api_versions():
-            url = f"{GEMINI_BASE_URL}/{api_version}/{model_path}:generateContent"
-            resp = None
-            last_transport_error = ""
-            for attempt in range(MAX_RETRIES + 1):
-                try:
-                    resp = requests.post(
-                        url,
-                        params={"key": GEMINI_API_KEY},
-                        json=payload,
-                        timeout=TIMEOUT_SECONDS,
-                    )
-                except Exception as exc:
-                    last_transport_error = _sanitize_error(str(exc))
-                    if attempt < MAX_RETRIES:
-                        wait_s = RETRY_BASE_SECONDS * (2 ** attempt)
-                        time.sleep(wait_s)
-                        continue
-                    break
-
-                if resp.status_code in (429, 500, 502, 503, 504) and attempt < MAX_RETRIES:
+        payload["model"] = candidate
+        url = f"{GROQ_BASE_URL}/chat/completions"
+        
+        resp = None
+        last_transport_error = ""
+        
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                _respect_min_call_interval()
+                resp = requests.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=TIMEOUT_SECONDS,
+                )
+                _mark_call_timestamp()
+            except Exception as exc:
+                last_transport_error = _sanitize_error(str(exc))
+                if attempt < MAX_RETRIES:
                     wait_s = RETRY_BASE_SECONDS * (2 ** attempt)
+                    wait_s = min(wait_s, max(1.0, MAX_RETRY_DELAY_SECONDS))
                     time.sleep(wait_s)
                     continue
-
                 break
 
-            if resp is None:
-                if last_transport_error:
-                    soft_errors.append(last_transport_error)
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < MAX_RETRIES:
+                wait_s = RETRY_BASE_SECONDS * (2 ** attempt)
+                wait_s = min(wait_s, max(1.0, MAX_RETRY_DELAY_SECONDS))
+                if resp.status_code == 429:
+                    header_wait = _retry_after_seconds(resp)
+                    _set_rate_limit_cooldown(header_wait)
+                    if FAIL_FAST_ON_429:
+                        break
+                    wait_s = max(wait_s, RATE_LIMIT_MIN_WAIT_SECONDS, header_wait)
+                time.sleep(wait_s)
                 continue
 
-            if resp.status_code in (400, 404):
-                soft_errors.append(f"{candidate}@{api_version}:HTTP {resp.status_code}")
-                continue
+            break
 
-            if resp.status_code == 429:
-                soft_errors.append(f"{candidate}@{api_version}:rate_limited")
-                continue
+        if resp is None:
+            if last_transport_error:
+                soft_errors.append(last_transport_error)
+            continue
 
-            if resp.status_code >= 300:
-                snippet = _sanitize_error((resp.text or "")[:260])
-                raise RuntimeError(
-                    f"[{agent_tag}] Gemini request failed with HTTP {resp.status_code}: {snippet}"
-                )
+        if resp.status_code in (400, 404):
+            soft_errors.append(f"{candidate}:HTTP {resp.status_code}")
+            continue
 
-            try:
-                data = resp.json()
-            except Exception as exc:
-                raise RuntimeError(
-                    f"[{agent_tag}] Gemini returned invalid JSON: {_sanitize_error(str(exc))}"
-                ) from exc
+        if resp.status_code == 429:
+            _set_rate_limit_cooldown(_retry_after_seconds(resp))
+            soft_errors.append(f"{candidate}:rate_limited")
+            continue
 
-            candidates = data.get("candidates") or []
-            if not candidates:
-                feedback = data.get("promptFeedback")
-                raise RuntimeError(f"[{agent_tag}] Gemini returned no candidates. Feedback: {feedback}")
+        if resp.status_code >= 300:
+            snippet = _sanitize_error((resp.text or "")[:260])
+            raise RuntimeError(
+                f"[{agent_tag}] Groq request failed with HTTP {resp.status_code}: {snippet}"
+            )
 
-            parts = ((candidates[0].get("content") or {}).get("parts") or [])
-            content = "".join((p.get("text") or "") for p in parts if isinstance(p, dict)).strip()
-            if not content:
-                finish_reason = candidates[0].get("finishReason", "UNKNOWN")
-                raise RuntimeError(
-                    f"[{agent_tag}] Empty response from Gemini model '{candidate}' (finishReason={finish_reason})."
-                )
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise RuntimeError(
+                f"[{agent_tag}] Groq returned invalid JSON: {_sanitize_error(str(exc))}"
+            ) from exc
 
-            MODEL = candidate
-            _ACTIVE_API_VERSION = api_version
-            return content
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError(f"[{agent_tag}] Groq returned no choices. Data: {data}")
+
+        content = choices[0].get("message", {}).get("content", "").strip()
+        if not content:
+            finish_reason = choices[0].get("finish_reason", "UNKNOWN")
+            raise RuntimeError(
+                f"[{agent_tag}] Empty response from Groq model '{candidate}' (finish_reason={finish_reason})."
+            )
+
+        MODEL = candidate
+        _clear_rate_limit_cooldown()
+        return content
 
     detail = "; ".join(soft_errors[:4])
     raise RuntimeError(
-        f"[{agent_tag}] Gemini request failed for configured models."
+        f"[{agent_tag}] Groq request failed for configured models."
         + (f" Tried: {detail}" if detail else "")
     )

@@ -1,0 +1,15 @@
+{
+  "devCommand": "uvicorn api_service:app --host 0.0.0.0 --port 8000",
+  "builds": [
+    {
+      "src": "api_service.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "api_service.py"
+    }
+  ]
+}

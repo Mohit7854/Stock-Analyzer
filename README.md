@@ -1,17 +1,18 @@
 # Stock market analysis lab
 
-A compact **multi-agent workflow** that simulates an equity research desk for single-stock and two-stock analysis. Each stage is handled by a dedicated Gemini-powered role: market research, technical analysis, fundamental analysis, and final investment synthesis.
+A compact **multi-agent workflow** that simulates an equity research desk for single-stock and two-stock analysis. Each stage is handled by a dedicated Groq-powered role: market research, technical analysis, fundamental analysis, and final investment synthesis.
 
-The app includes a **FastAPI** backend with a built-in browser UI. Orchestration and prompts run in Python using **Gemini**, **Yahoo Finance**, and **Tavily** for real-time market research and context enrichment.
+The app includes a **FastAPI** backend with a built-in browser UI. Orchestration and prompts run in Python using **Groq**, **Yahoo Finance**, and optional **Tavily** context enrichment.
 
 ## What the pipeline does
 
 | Stage | Role | What happens |
 |------|------|------|
-| 1 | **Market research** | Resolves ticker from natural language, fetches Yahoo market data, **enriches context with Tavily** (market sentiment, recent news), and writes a trend report. |
-| 2 | **Technical analyst** | Interprets moving averages, RSI, MACD, bands, and support/resistance; **integrates Tavily analyst commentary** to produce signal and confidence. |
-| 3 | **Fundamental analyst** | Reviews valuation, growth, profitability, leverage; **pulls Tavily catalysts, earnings outlook, risks** to produce a horizon-oriented view. |
-| 4 | **Investment advisor** | Synthesizes all signals into a final recommendation with risk, conviction, position sizing, and governance checks; **uses Tavily sentiment in conviction scoring**. |
+| 1 | **Market research** | Resolves ticker from natural language, fetches Yahoo market data, and optionally enriches with Tavily sentiment/news context. |
+| 2 | **Technical analyst** | Interprets moving averages, RSI, MACD, bands, and support/resistance from Yahoo data (Tavily optional and off by default). |
+| 3 | **Fundamental analyst** | Reviews valuation, growth, profitability, leverage; optionally pulls Tavily catalysts/risks context. |
+| 4 | **Macro & Risk specialist** | Evaluates broader economic shifts, regulatory risks, and industry-wide headwinds; optionally enriches with Tavily context. |
+| 5 | **Investment advisor** | Synthesizes all signals into the final recommendation with risk, conviction, position sizing, and governance checks. |
 
 This project is designed as a teaching/demo system. A full deep-mode run can trigger multiple billed LLM calls and external data queries.
 
@@ -19,9 +20,9 @@ This project is designed as a teaching/demo system. A full deep-mode run can tri
 
 - **Python 3.10+**
 - **FastAPI** + **Uvicorn** for API serving
-- **Gemini API** (text synthesis and structured reasoning)
+- **Groq API** (text synthesis and structured reasoning)
 - **Yahoo Finance** via `yfinance` for market, technical, and fundamental data
-- **Tavily** (required) for real-time market research, sentiment analysis, and catalyst discovery
+- **Tavily** (optional enhancer) for additional real-time news/catalyst context
 - **python-dotenv** for local environment configuration
 
 ## Quick start
@@ -44,14 +45,24 @@ This project is designed as a teaching/demo system. A full deep-mode run can tri
 3. **Create `.env` in the project root**
 
 	 ```env
-	 GEMINI_API_KEY=your_gemini_api_key
-	 GEMINI_MODEL=gemini-2.0-flash
-	 GEMINI_TIMEOUT=180
+	 GROQ_API_KEY=your_groq_api_key
+	 GROQ_MODEL=llama-3.3-70b-versatile
+	 GROQ_TIMEOUT=60
+	 GROQ_MIN_CALL_INTERVAL_SECONDS=1.0
+	 GROQ_FAIL_FAST_ON_429=true
+	 GROQ_RATE_LIMIT_COOLDOWN_SECONDS=60
 	 TAVILY_API_KEY=tvly-...
+	 TAVILY_ENABLED_AGENTS=1,3
+	 TAVILY_FAIL_OPEN=true
+	 TAVILY_MAX_RETRIES=1
+	 TAVILY_MIN_DELAY_SECONDS=1.5
+	 TAVILY_SEARCH_DEPTH=basic
 	 ```
 
-	 **Both `GEMINI_API_KEY` and `TAVILY_API_KEY` are required.** The system will not start without them.
-	 - Get your Gemini API key from [Google AI Studio](https://aistudio.google.com)
+	 `GROQ_API_KEY` is required.
+	 `TAVILY_API_KEY` is optional when `TAVILY_FAIL_OPEN=true` (default).
+	 If you set `TAVILY_FAIL_OPEN=false`, Tavily becomes required.
+	 - Get your Groq API key from [Groq Cloud Console](https://console.groq.com)
 	 - Get your Tavily API key from [Tavily](https://tavily.com)
 
 4. **Run the API + UI**
@@ -64,25 +75,27 @@ This project is designed as a teaching/demo system. A full deep-mode run can tri
 
 ## Tavily Integration
 
-**Tavily is mandatory** for all analysis operations. The system uses Tavily to enrich real-time context across all four research stages:
+Tavily is an context layer. Yahoo Finance remains the primary market/technical/fundamental source.
 
-### How Tavily is Used
+### Default Usage Policy
 
-- **Agent 1 (Market Research)**: Fetches latest stock news, market sentiment, and recent developments
-- **Agent 2 (Technical Analyst)**: Pulls analyst commentary, implied volatility, positioning data
-- **Agent 3 (Fundamental Analyst)**: Discovers earnings catalysts, guidance, and risk developments
-- **Agent 4 (Investment Advisor)**: Incorporates latest sentiment into conviction and risk calculations
+- `TAVILY_ENABLED_AGENTS=1,3,4` by default (Market + Fundamental + Macro)
+- Agent 2 technical analysis is Yahoo-first by default
+- Queries are capped and throttled to reduce usage spikes
+- If Tavily fails and `TAVILY_FAIL_OPEN=true`, the pipeline continues with Yahoo + LLM
+- When quota/auth failures occur, Tavily is temporarily disabled for the current process to avoid repeated errors
 
 ### Resilience & Retry Logic
 
-Each agent has automatic retry logic for Tavily queries:
-- **3 retries** on API failure with exponential backoff (1s → 2s → 4s)
-- Failures after retry exhaustion will **block the entire analysis** with clear error message
-- This ensures all reports have current, high-quality market context or fail completely
+The Tavily helper applies quota-safe behavior:
+- low default retries (`TAVILY_MAX_RETRIES=1`)
+- per-query pacing (`TAVILY_MIN_DELAY_SECONDS=1.5`)
+- per-agent query caps (quick/deep) via environment variables
+- quota/auth failures can short-circuit remaining Tavily queries to avoid waste
 
 ### Health Check
 
-The `/health` endpoint will return **503 Service Unavailable** if either Gemini or Tavily is misconfigured:
+The `/health` endpoint always requires Groq. Tavily is required only when `TAVILY_FAIL_OPEN=false` for enabled agents.
 
 ```bash
 # Check if system is ready
@@ -93,10 +106,14 @@ Expected response when ready:
 ```json
 {
   "ok": true,
-  "message": "Gemini is available.",
+  "message": "Groq is available.",
   "checks": {
-    "gemini": true,
-    "tavily_api_key_configured": true
+    "groq": true,
+		"tavily_api_key_configured": true,
+		"tavily_required": false,
+		"tavily_fail_open": true,
+		"tavily_enabled_agents": ["agent1", "agent3", "agent4"],
+		"tavily_status": "configured"
   }
 }
 ```
@@ -121,17 +138,18 @@ python run.py "compare asian paints and mrf"
 
 ### v3.0 Features (Current)
 
-- **Mandatory Tavily Integration**: Tavily is now required (not optional) for all analyses
-  - All agents use real-time market context from Tavily
-  - Automatic retry logic: 3 attempts with exponential backoff (1s → 2s → 4s)
-  - Health check enforces both Gemini and Tavily availability
-  - Startup will fail with clear error if `TAVILY_API_KEY` is missing
+- **Hybrid Tavily Policy**: Yahoo-first pipeline with optional Tavily enhancement
+	- Default enabled agents: 1 and 3 (`TAVILY_ENABLED_AGENTS=1,3`)
+	- Lower Tavily usage via query caps + pacing controls
+	- Fail-open mode supported (`TAVILY_FAIL_OPEN=true`) to keep pipeline running
+	- Health check reports Tavily status/requirement explicitly
 
 - **Enriched Agent Context**:
   - **Market Research**: Real-time news, sentiment data, market developments
   - **Technical Analyst**: Analyst commentary, options flow, volatility positioning
   - **Fundamental Analyst**: Earnings catalysts, guidance, risk factors from current sources
-  - **Investment Advisor**: Sentiment-based conviction scoring, current market regime analysis
+  - **Macro & Risk Specialist**: Interest rate trends, regulatory shifts, sector headwinds
+  - **Investment Advisor**: Sentiment-based conviction scoring, current market regime analysis, risk-adjusted sizing
 
 - **Improved Resilience**: Automatic retry logic prevents transient API failures from blocking analysis
 
@@ -287,10 +305,14 @@ After running an analysis in the **Analyze** tab, click the "Download Report" bu
 
 4. Set environment variables in Vercel project settings:
 
-	 - `GEMINI_API_KEY` (required)
-	 - `GEMINI_MODEL` (optional, defaults to gemini-2.0-flash)
-	 - `GEMINI_TIMEOUT` (optional, defaults to 180)
-	 - `TAVILY_API_KEY` (required)
+	 - `GROQ_API_KEY` (required)
+	 - `GROQ_MODEL` (optional, defaults to llama-3.3-70b-versatile)
+	 - `GROQ_TIMEOUT` (optional, defaults to 60)
+	 - `TAVILY_API_KEY` (optional when `TAVILY_FAIL_OPEN=true`)
+	 - `TAVILY_ENABLED_AGENTS` (optional, default `1,3`)
+	 - `TAVILY_FAIL_OPEN` (optional, default `true`)
+	 - `TAVILY_MAX_RETRIES` (optional, default `1`)
+	 - `TAVILY_MIN_DELAY_SECONDS` (optional, default `1.5`)
 
 5. Deploy and test `/health` and `/analyze`.
 
@@ -322,12 +344,14 @@ Steps:
 ├── api_service.py              # FastAPI app with all endpoints
 ├── run.py                       # CLI orchestrator
 ├── llm_client.py               # Gemini API wrapper
-├── market_data.py              # Yahoo Finance + Tavily integration
+├── market_data.py              # Yahoo Finance data and indicators
+├── tavily_service.py           # Tavily policy, throttling, and fallback helpers
 ├── agent1_market_research.py   # Market data and trend research
 ├── agent2_technical_analyst.py # Technical indicators and signals
 ├── agent3_fundamental_analyst.py # Valuation and growth analysis
-├── agent4_investment_advisor.py  # Final synthesis and risk governance
-├── agent4_utils.py             # Guardrail rules and position sizing
+├── agent4_macro_risk_specialist.py # Macro, regulatory, and systemic risk
+├── agent5_investment_advisor.py  # Final synthesis and risk governance
+├── agent5_utils.py             # Guardrail rules and position sizing
 ├── ui/                         # Web UI (HTML, CSS, JS)
 ├── requirements.txt            # Python dependencies
 ├── info.txt                    # Comprehensive project documentation
@@ -359,11 +383,12 @@ See `info.txt` in the project root.
 
 ### Tavily API Key Missing
 
-**Error**: `ValueError: TAVILY_API_KEY environment variable is required.`
+**Error**: Tavily key missing warning or strict-mode startup failure.
 
 **Solution**: 
 - Verify `TAVILY_API_KEY` is set in your `.env` file
 - Ensure the key is not empty or whitespace-only
+- If you want strict mode, set `TAVILY_FAIL_OPEN=false`
 - Restart the API after updating `.env`
 
 ### Health Check Returns 503
@@ -371,20 +396,22 @@ See `info.txt` in the project root.
 **Error**: `"ok": false` from `/health` endpoint
 
 **Solution**:
-- Check both `gemini` and `tavily_api_key_configured` flags in the response
-- Verify `GEMINI_API_KEY` is valid
-- Verify `TAVILY_API_KEY` is valid
+- Check `groq`, `tavily_required`, and `tavily_status` flags in the response
+- Verify `GROQ_API_KEY` is valid
+- If `tavily_required=true`, verify `TAVILY_API_KEY` is valid
 - Run `uvicorn api_service:app --reload` to see startup logs
 
-### Tavily Search Fails After Retries
+### Tavily Search Fails or Quota Is Hit
 
-**Error**: `RuntimeError: Tavily search failed after 3 attempts: ...`
+**Error**: Tavily warning appears and context is degraded.
 
 **Causes & Solutions**:
-- **Rate limit hit**: Check your Tavily plan limits. Retry later or upgrade.
+- **Rate limit hit**: reduce query volume (`TAVILY_ENABLED_AGENTS=1,3`, quick mode, lower query caps) and retry later.
 - **Invalid API key**: Verify the key in `.env` is correct
 - **Network issue**: Check internet connection
 - **Tavily service down**: Check [Tavily status page](https://tavily.com)
+
+By default (`TAVILY_FAIL_OPEN=true`) analysis continues with Yahoo + LLM and returns warnings/degraded metadata.
 
 ### Analysis Hangs or Times Out
 
@@ -393,7 +420,7 @@ See `info.txt` in the project root.
 **Solution**:
 - Quick mode (default) is faster; try `--mode quick`
 - Check internet connection speed
-- Verify Tavily API key has sufficient rate limit quota
+- Reduce Tavily pressure with `TAVILY_MAX_RETRIES=1` and higher `TAVILY_MIN_DELAY_SECONDS`
 - Use `/health` to verify service is ready before analysis
 
 ### CLI Exits Without Output
@@ -403,5 +430,6 @@ See `info.txt` in the project root.
 **Solution**:
 - Check that `.env` exists in the same directory as `run.py`
 - Run with verbose logging: Add print statements to trace execution
-- Verify `GEMINI_API_KEY` and `TAVILY_API_KEY` are both set
+- Verify `GROQ_API_KEY` is set
+- If running strict mode (`TAVILY_FAIL_OPEN=false`), verify `GROQ_API_KEY` is set
 - Try running from project root: `cd "EndSEM project" && python run.py`

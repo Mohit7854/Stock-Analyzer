@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.0-flash}"
-export GEMINI_TIMEOUT="${GEMINI_TIMEOUT:-180}"
-export GEMINI_BASE_URL="${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com}"
+export GROQ_MODEL="${GROQ_MODEL:-llama-3.3-70b-versatile}"
+export GROQ_TIMEOUT="${GROQ_TIMEOUT:-60}"
+export GROQ_BASE_URL="${GROQ_BASE_URL:-https://api.groq.com/openai/v1}"
 
-if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-  echo "GEMINI_API_KEY is required."
+if [[ -z "${GROQ_API_KEY:-}" ]]; then
+  echo "GROQ_API_KEY is required."
   exit 1
 fi
 

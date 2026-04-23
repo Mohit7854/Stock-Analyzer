@@ -1,5 +1,5 @@
 """
-agent4_utils.py - Reliability and decision-quality helpers for Agent 4.
+agent5_utils.py - Reliability and decision-quality helpers for Agent 5.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ HORIZONS = {"SHORT", "MEDIUM", "LONG"}
 CONFIDENCE_LEVELS = {"HIGH", "MEDIUM", "LOW", "UNKNOWN"}
 SIGNAL_VALUES = {"BUY", "HOLD", "SELL", "UNKNOWN"}
 TREND_VALUES = {"BULLISH", "NEUTRAL", "BEARISH", "UNKNOWN"}
+MACRO_VALUES = {"STABLE", "CAUTION", "CRITICAL", "UNKNOWN"}
 
 
 @dataclass
@@ -24,6 +25,7 @@ class ParsedSignals:
     technical_signal: str
     technical_confidence: str
     fundamental_view: str
+    macro_rating: str
     horizon: str
     warnings: list[str]
 
@@ -116,6 +118,7 @@ def parse_signals(outputs: dict[str, Any]) -> ParsedSignals:
     market_text = str(outputs.get("market_report", ""))
     technical_text = str(outputs.get("technical_report", ""))
     fundamental_text = str(outputs.get("fundamental_report", ""))
+    macro_text = str(outputs.get("macro_report", ""))
 
     trend_raw = _extract_value(
         market_text,
@@ -142,6 +145,13 @@ def parse_signals(outputs: dict[str, Any]) -> ParsedSignals:
             r"FUNDAMENTAL\s+VERDICT\s*[:=\-]\s*([A-Za-z]+)",
         ],
     )
+    macro_raw = _extract_value(
+        macro_text,
+        [
+            r"MACRO\s+RATING\s*[:=\-]\s*([A-Za-z]+)",
+            r"MACRO\s+VIEW\s*[:=\-]\s*([A-Za-z]+)",
+        ],
+    )
     horizon_raw = _extract_value(
         fundamental_text,
         [r"HORIZON\s*[:=\-]\s*([A-Za-z]+)"],
@@ -151,6 +161,7 @@ def parse_signals(outputs: dict[str, Any]) -> ParsedSignals:
     technical_signal = _normalize_choice(technical_raw, SIGNAL_VALUES, "UNKNOWN")
     technical_confidence = _normalize_choice(confidence_raw, CONFIDENCE_LEVELS, "UNKNOWN")
     fundamental_view = _normalize_choice(fund_raw, SIGNAL_VALUES, "UNKNOWN")
+    macro_rating = _normalize_choice(macro_raw, MACRO_VALUES, "UNKNOWN")
     horizon = _normalize_choice(horizon_raw, HORIZONS, "MEDIUM")
 
     if trend == "UNKNOWN":
@@ -161,12 +172,15 @@ def parse_signals(outputs: dict[str, Any]) -> ParsedSignals:
         warnings.append("Missing or unparseable technical confidence.")
     if fundamental_view == "UNKNOWN":
         warnings.append("Missing or unparseable fundamental view.")
+    if macro_rating == "UNKNOWN":
+        warnings.append("Missing or unparseable macro rating.")
 
     return ParsedSignals(
         trend=trend,
         technical_signal=technical_signal,
         technical_confidence=technical_confidence,
         fundamental_view=fundamental_view,
+        macro_rating=macro_rating,
         horizon=horizon,
         warnings=warnings,
     )
@@ -176,7 +190,8 @@ def validate_stock_data(stock_data: dict[str, Any]) -> tuple[list[str], list[str
     if not isinstance(stock_data, dict):
         return ["stock_data is missing or not a dictionary."], []
 
-    critical_fields = ["price", "ma50", "ma200", "rsi14"]
+    critical_fields = ["price"]
+    technical_fields = ["ma50", "ma200", "rsi14"]
     important_fields = ["beta", "volatility_annual_pct", "trailing_pe", "market_cap"]
 
     errors: list[str] = []
@@ -185,6 +200,10 @@ def validate_stock_data(stock_data: dict[str, Any]) -> tuple[list[str], list[str
     for field in critical_fields:
         if stock_data.get(field) is None:
             errors.append(f"Critical stock_data field missing: {field}")
+
+    for field in technical_fields:
+        if stock_data.get(field) is None:
+            warnings.append(f"Technical indicator unavailable: {field}")
 
     for field in important_fields:
         if stock_data.get(field) is None:

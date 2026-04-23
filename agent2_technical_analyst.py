@@ -9,33 +9,14 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 import json
-import os
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-from tavily import TavilyClient
 
 from llm_client import _llm
+from tavily_service import fetch_tavily_context
 
 TAG = "Agent 2"
-TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "").strip()
-if not TAVILY_API_KEY:
-    raise ValueError("TAVILY_API_KEY environment variable is required.")
-tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
-
-def _retry_tavily_search(query: str, max_retries: int = 3, base_delay: float = 1.0) -> dict:
-    """Execute Tavily search with exponential backoff retry logic."""
-    for attempt in range(max_retries):
-        try:
-            return tavily_client.search(query=query, search_depth="advanced", max_results=3, include_answer=True)
-        except Exception as exc:
-            if attempt == max_retries - 1:
-                raise RuntimeError(f"Tavily search failed after {max_retries} attempts: {str(exc)}") from exc
-            delay = base_delay * (2 ** attempt)
-            time.sleep(delay)
 
 
-def fetch_market_commentary(ticker: str, company: str, mode: str = "quick") -> dict:
+def fetch_market_commentary(ticker: str, company: str, mode: str = "quick") -> tuple[dict, dict]:
 
     mode = (mode or "quick").strip().lower()
     deep = mode == "deep"
@@ -53,30 +34,19 @@ def fetch_market_commentary(ticker: str, company: str, mode: str = "quick") -> d
         max_results = 3
         snippet_len = 320
 
-    out: dict[str, dict] = {}
-
-    def _fetch_one(q: str) -> tuple[str, dict]:
-        try:
-            r = _retry_tavily_search(q)
-            return q, {
-                "answer": r.get("answer", ""),
-                "results": [
-                    {"title": x.get("title", ""), "content": (x.get("content", "")[:snippet_len])}
-                    for x in r.get("results", [])
-                ],
-            }
-        except Exception as exc:
-            raise RuntimeError(f"Failed to fetch Tavily context for '{q}': {str(exc)}") from exc
-
-    with ThreadPoolExecutor(max_workers=min(4, len(queries))) as pool:
-        futures = [pool.submit(_fetch_one, q) for q in queries]
-        for fut in as_completed(futures):
-            q, payload = fut.result()
-            out[q] = payload
+    out, meta = fetch_tavily_context(
+        agent_id=2,
+        mode=mode,
+        queries=queries,
+        max_results=max_results,
+        snippet_len=snippet_len,
+        quick_cap_default=1,
+        deep_cap_default=1,
+    )
 
     if deep:
-        return out
-    return next(iter(out.values()), {})
+        return out, meta
+    return next(iter(out.values()), {}), meta
 
 
 def analyze_technicals(ticker: str, company: str, stock_data: dict, tavily_context: dict, mode: str = "quick") -> str:
@@ -234,8 +204,18 @@ def run(agent1_output: dict, mode: str = "quick") -> dict:
     company = agent1_output["company"]
     stock_data = agent1_output.get("stock_data", {})
 
-    print(f"\n[Agent 2] Fetching Tavily technical context for {ticker}...")
-    tavily_context = fetch_market_commentary(ticker, company, mode=mode)
+    print(f"\n[Agent 2] Loading technical context for {ticker}...")
+    tavily_context, tavily_meta = fetch_market_commentary(ticker, company, mode=mode)
+    if tavily_meta.get("enabled"):
+        print(
+            f"[Agent 2] Tavily queries used: {int(tavily_meta.get('successful_queries', 0) or 0)}"
+            f"/{int(tavily_meta.get('attempted_queries', 0) or 0)}"
+        )
+    else:
+        print("[Agent 2] Tavily disabled by policy for this agent (Yahoo-only).")
+    if tavily_meta.get("warnings"):
+        for warning in tavily_meta.get("warnings", []):
+            print(f"[Agent 2] Tavily note: {warning}")
 
     print(f"[Agent 2] Running technical analysis...")
     report = analyze_technicals(ticker, company, stock_data, tavily_context, mode=mode)
@@ -243,9 +223,15 @@ def run(agent1_output: dict, mode: str = "quick") -> dict:
     return {
         **agent1_output,
         "technical_context": tavily_context,
+        "technical_context_meta": tavily_meta,
         "technical_report": report,
         "research_depth": mode,
-        "technical_context_queries_used": len(tavily_context) if isinstance(tavily_context, dict) else 0,
+        "technical_context_queries_used": int(tavily_meta.get("successful_queries", 0) or 0),
+        "technical_context_queries_attempted": int(tavily_meta.get("attempted_queries", 0) or 0),
+        "technical_context_warnings": tavily_meta.get("warnings", []),
+        "tavily_degraded": bool(
+            agent1_output.get("tavily_degraded", False) or tavily_meta.get("degraded", False)
+        ),
     }
 
 

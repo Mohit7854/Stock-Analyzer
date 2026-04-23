@@ -14,7 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import run as orchestrator
-from llm_client import check_gemini
+from llm_client import check_groq
+from tavily_service import get_tavily_policy
 
 app = FastAPI(title="Stock Analysis API", version="1.0.0")
 
@@ -60,6 +61,7 @@ def _single_summary(output: dict) -> dict:
         "company": output.get("company") if isinstance(output, dict) else None,
         "verdict": decision.get("verdict"),
         "conviction": decision.get("conviction"),
+        "reasoning": decision.get("reasoning"),
         "risk": decision.get("risk"),
         "position_size_pct": decision.get("position_size_pct"),
         "time_horizon": decision.get("time_horizon"),
@@ -96,21 +98,39 @@ def root_api() -> dict:
 
 @app.get("/health")
 def health() -> JSONResponse:
-    gemini_ok, gemini_message = check_gemini()
+    groq_ok, groq_message = check_groq()
+    policy = get_tavily_policy()
     tavily_configured = bool((os.environ.get("TAVILY_API_KEY") or "").strip())
+    tavily_required = bool(policy.get("required"))
+    enabled_agents = policy.get("enabled_agent_names") or []
 
-    ok = gemini_ok and tavily_configured
+    ok = groq_ok and not (tavily_required and not tavily_configured)
     code = 200 if ok else 503
-    
-    if not tavily_configured:
-        gemini_message += " (TAVILY_API_KEY is required and not set)"
+
+    if not enabled_agents:
+        tavily_status = "disabled"
+    elif tavily_configured:
+        tavily_status = "configured"
+    elif tavily_required:
+        tavily_status = "required_missing"
+    else:
+        tavily_status = "optional_missing"
+
+    if tavily_status == "required_missing":
+        groq_message += " (TAVILY_API_KEY is required because TAVILY_FAIL_OPEN=false)"
+    elif tavily_status == "optional_missing":
+        groq_message += " (TAVILY_API_KEY not set; Tavily context will be skipped when unavailable)"
     
     payload = {
         "ok": ok,
-        "message": gemini_message,
+        "message": groq_message,
         "checks": {
-            "gemini": gemini_ok,
+            "groq": groq_ok,
             "tavily_api_key_configured": tavily_configured,
+            "tavily_required": tavily_required,
+            "tavily_fail_open": bool(policy.get("fail_open", True)),
+            "tavily_enabled_agents": enabled_agents,
+            "tavily_status": tavily_status,
         },
     }
     return JSONResponse(status_code=code, content=payload)
@@ -129,6 +149,8 @@ def analyze(req: AnalyzeRequest) -> dict:
         "mode": "single",
         "synthesis_mode": mode,
         "elapsed": result.get("elapsed", 0.0),
+        "degraded": bool(result.get("degraded", False)),
+        "warnings": result.get("warnings", []),
         "summary": _single_summary(output),
         "output": output,
     }
@@ -150,6 +172,8 @@ def compare(req: CompareRequest) -> dict:
     return {
         "mode": "multi",
         "synthesis_mode": mode,
+        "degraded": bool(result.get("degraded", False)),
+        "warnings": result.get("warnings", []),
         "stock_a_summary": _single_summary(result.get("stock_a", {})),
         "stock_b_summary": _single_summary(result.get("stock_b", {})),
         **result,
@@ -181,6 +205,8 @@ def run_auto(req: AutoRunRequest) -> dict:
         return {
             "mode": "multi",
             "synthesis_mode": analysis_mode,
+            "degraded": bool(result.get("degraded", False)),
+            "warnings": result.get("warnings", []),
             "stock_a_summary": _single_summary(result.get("stock_a", {})),
             "stock_b_summary": _single_summary(result.get("stock_b", {})),
             **result,
@@ -196,6 +222,8 @@ def run_auto(req: AutoRunRequest) -> dict:
         "mode": "single",
         "synthesis_mode": analysis_mode,
         "elapsed": result.get("elapsed", 0.0),
+        "degraded": bool(result.get("degraded", False)),
+        "warnings": result.get("warnings", []),
         "summary": _single_summary(output),
         "output": output,
     }

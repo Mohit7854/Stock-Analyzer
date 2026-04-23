@@ -213,7 +213,7 @@ function summarizeReportBits(text, maxChars) {
       if (!line) return false;
       if (line.indexOf("##") === 0 || line.indexOf("###") === 0 || line.indexOf("#") === 0) return false;
       if (lower.indexOf("fallback") !== -1) return false;
-      if (lower.indexOf("gemini request failed") !== -1) return false;
+      if (lower.indexOf("groq request failed") !== -1) return false;
       if (lower.indexOf("rate_limited") !== -1) return false;
       if (lower.indexOf("tried:") !== -1) return false;
       return true;
@@ -275,7 +275,7 @@ function collectWarnings(output) {
   const hiddenPatterns = [
     "signal conflict detected; conviction downgrade applied",
     "fallback mode used due to llm error",
-    "gemini request failed for configured models",
+    "groq request failed for configured models",
     "fallback summary used because llm was unavailable",
     "fallback engine used due to llm unavailability",
     "deterministic synthesis applied due to temporary model unavailability"
@@ -602,7 +602,7 @@ async function checkHealth() {
     const body = await res.json();
     if (body.ok) {
       const checks = body.checks || {};
-      healthBadge.textContent = "API Healthy | Gemini: " + (checks.gemini ? "OK" : "Down") + " | Tavily: " + (checks.tavily_api_key_configured ? "Configured" : "Missing");
+      healthBadge.textContent = "API Healthy | Groq: " + (checks.groq ? "OK" : "Down") + " | Tavily: " + (checks.tavily_api_key_configured ? "Configured" : "Missing");
       healthBadge.classList.remove("bad");
       healthBadge.classList.add("good");
     } else {

@@ -343,7 +343,7 @@ Steps:
 .
 ├── api_service.py              # FastAPI app with all endpoints
 ├── run.py                       # CLI orchestrator
-├── llm_client.py               # Gemini API wrapper
+├── llm_client.py               # Groq API wrapper
 ├── market_data.py              # Yahoo Finance data and indicators
 ├── tavily_service.py           # Tavily policy, throttling, and fallback helpers
 ├── agent1_market_research.py   # Market data and trend research
